@@ -21,6 +21,8 @@ from app.main import app
 from app.services.rag import GraphRAGService
 from app.services.sandbox import SandboxService
 from app.config import Settings
+from app.services.model_router import ModelRouter
+from app.storage.db import Database
 
 
 @pytest.fixture(autouse=True)
@@ -148,3 +150,55 @@ def test_knowledge_update_source_and_soft_delete():
         inactive = client.get("/api/v1/admin/knowledge/items", params={"include_inactive": "true"}).json()["items"]
         assert all(item["id"] != "Q-MANAGED-001" for item in active)
         assert any(item["id"] == "Q-MANAGED-001" and item["is_active"] is False for item in inactive)
+
+
+def test_user_profile_job_favorite_history_and_report_persist():
+    with TestClient(app) as client:
+        user = client.post("/api/v1/users/temporary", json={"display_name": "测试用户"})
+        assert user.status_code == 200
+        headers = {"X-User-Id": user.json()["user"]["id"]}
+        profile = client.put(
+            "/api/v1/profile", headers=headers,
+            json={"skills": ["Python"], "projects": ["TechMatch"], "experience": "后端"},
+        )
+        assert profile.status_code == 200
+        job = client.post(
+            "/api/v1/jobs", headers=headers,
+            json={"title": "后端工程师", "jd_text": "Python FastAPI PostgreSQL"},
+        )
+        assert job.status_code == 200
+        assert "python" in [x.lower() for x in job.json()["job"]["skills"]]
+        favorite = client.post("/api/v1/questions/Q001/favorite", headers=headers, json={"favorite": True})
+        assert favorite.status_code == 200
+        assert any(item["id"] == "Q001" for item in client.get("/api/v1/favorites", headers=headers).json()["items"])
+        report = client.post("/api/v1/reports", headers=headers, json={"title": "回归报告", "payload": {"score": 4}})
+        assert report.status_code == 200
+        assert any(item["title"] == "回归报告" for item in client.get("/api/v1/reports", headers=headers).json()["reports"])
+
+
+def test_model_fallback_is_recorded_with_telemetry():
+    path = Path(tempfile.mkdtemp(prefix="router-tests-")) / "router.db"
+    database = Database(path)
+    database.init()
+    try:
+        router = ModelRouter(Settings(strong_model_api_key="", local_model_base_url=""), database)
+        import asyncio
+        result = asyncio.run(router.complete("evaluate", [{"role": "user", "content": "hello"}]))
+        assert result["fallback"] is True
+        row = database._conn.execute("SELECT provider, status, fallback_reason FROM model_invocations ORDER BY created_at DESC LIMIT 1").fetchone()
+        assert row[0] == "fallback"
+        assert row[1] == "fallback"
+        assert row[2] == "no_model_configured"
+    finally:
+        database.close()
+
+
+def test_rag_extracts_normalized_skills_and_reports_recall():
+    from app.services.rag import GraphRAGService, extract_skills
+    rag_service = GraphRAGService(Path("data/mock-interview-dataset.json"))
+    assert "python" in extract_skills("Python3 Fast API PostgreSQL")
+    result = rag_service.evaluate_recall([
+        {"mode": "algorithm", "role": "算法工程师", "job_text": "Python 数据结构", "profile": {}, "question_id": "Q009", "k": 5},
+    ])
+    assert result["cases"] == 1
+    assert 0 <= result["recall_at_k"] <= 1
