@@ -1,0 +1,225 @@
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
+
+
+InterviewMode = Literal["technical", "algorithm", "behavioral", "stress", "case", "research", "hr"]
+Difficulty = Literal["easy", "medium", "hard"]
+
+
+class UserProfile(BaseModel):
+    projects: list[str] = Field(default_factory=list)
+    skills: list[str] = Field(default_factory=list)
+    education: str | None = None
+    experience: str | None = None
+    constraints: list[str] = Field(default_factory=list)
+
+
+class SessionCreate(BaseModel):
+    mode: InterviewMode = "technical"
+    role: str = "通用软件开发工程师"
+    job_text: str = ""
+    user_profile: UserProfile = Field(default_factory=UserProfile)
+    difficulty: Difficulty = "medium"
+    # Optional anonymous-user and saved-JD references.  Existing clients can
+    # omit both fields; the API may create a temporary user automatically.
+    user_id: str | None = None
+    job_id: str | None = None
+
+
+class TemporaryUserCreate(BaseModel):
+    """Create or resume a temporary user (no password/auth secret)."""
+
+    user_id: str | None = None
+    display_name: str = "临时用户"
+
+
+class TemporaryUser(BaseModel):
+    id: str
+    display_name: str = ""
+    is_temporary: bool = True
+    created_at: str | None = None
+    last_seen_at: str | None = None
+
+
+class UserProfileUpdate(BaseModel):
+    skills: list[str] = Field(default_factory=list)
+    projects: list[str] = Field(default_factory=list)
+    education: str | None = None
+    experience: str | None = None
+    constraints: list[str] = Field(default_factory=list)
+
+
+class UserProfileRecord(BaseModel):
+    user_id: str
+    skills: list[str] = Field(default_factory=list)
+    projects: list[str] = Field(default_factory=list)
+    education: str | None = None
+    experience: str | None = None
+    constraints: list[str] = Field(default_factory=list)
+    profile_json: dict[str, Any] = Field(default_factory=dict)
+    updated_at: str | None = None
+
+
+class JobCreate(BaseModel):
+    id: str | None = None
+    title: str = ""
+    company: str = ""
+    role: str = ""
+    jd_text: str = ""
+    skills: list[str] = Field(default_factory=list)
+    source_url: str | None = None
+    source_license: str | None = None
+
+
+class JobRecord(BaseModel):
+    id: str
+    user_id: str | None = None
+    title: str = ""
+    company: str = ""
+    role: str = ""
+    jd_text: str = ""
+    skills: list[str] = Field(default_factory=list)
+    source_url: str | None = None
+    source_license: str | None = None
+    payload_json: dict[str, Any] = Field(default_factory=dict)
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class FavoriteRequest(BaseModel):
+    user_id: str
+    question_id: str
+
+
+class FavoriteRecord(BaseModel):
+    user_id: str
+    question_id: str
+    created_at: str | None = None
+
+
+class ReportCreate(BaseModel):
+    user_id: str | None = None
+    session_id: str | None = None
+    title: str = "训练报告"
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReportRecord(BaseModel):
+    id: str
+    user_id: str | None = None
+    session_id: str | None = None
+    title: str = ""
+    payload_json: dict[str, Any] = Field(default_factory=dict)
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class MatchRequest(BaseModel):
+    filters: dict[str, Any] = Field(default_factory=dict)
+
+
+class AnswerRequest(BaseModel):
+    session_id: str | None = None
+    question_id: str
+    answer_text: str = ""
+    code: str | None = None
+    language: str = "python"
+    tests: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AlgorithmRunRequest(BaseModel):
+    question_id: str
+    code: str
+    language: str = "python"
+    tests: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SessionStartResponse(BaseModel):
+    session_id: str
+    mode: InterviewMode
+    role: str
+    matched_skills: list[str] = Field(default_factory=list)
+    question_id: str
+    question: str
+    why_this_question: str
+    source_refs: list[str] = Field(default_factory=list)
+    tests: list[dict[str, Any]] = Field(default_factory=list)
+    status: str = "questioning"
+
+
+class Feedback(BaseModel):
+    scores: dict[str, float] = Field(default_factory=dict)
+    evidence_quotes: list[str] = Field(default_factory=list)
+    strengths: list[str] = Field(default_factory=list)
+    improvements: list[str] = Field(default_factory=list)
+    better_answer: str = ""
+    next_question: str | None = None
+    next_action: str = "进入下一题"
+    source_refs: list[str] = Field(default_factory=list)
+
+
+class TurnResponse(BaseModel):
+    turn_id: str
+    session_id: str
+    question_id: str
+    feedback: Feedback
+    next_question: dict[str, Any] | None = None
+    algorithm_result: dict[str, Any] | None = None
+
+
+class AlgorithmRunResponse(BaseModel):
+    job_id: str
+    session_id: str
+    question_id: str
+    status: Literal["passed", "failed", "timeout", "error", "rejected", "disabled"]
+    passed: int = 0
+    total: int = 0
+    stdout: str = ""
+    stderr: str = ""
+    runtime_ms: float = 0
+    details: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class KnowledgeItemCreate(BaseModel):
+    id: str | None = None
+    process_type: str
+    role: str = "通用岗位"
+    skills: list[str] = Field(default_factory=list)
+    difficulty: str = "中"
+    question: str
+    follow_ups: list[str] = Field(default_factory=list)
+    rubric: list[str] = Field(default_factory=list)
+    function_name: str | None = None
+    tests: list[dict[str, Any]] = Field(default_factory=list)
+    source: dict[str, Any] = Field(default_factory=lambda: {"type": "synthetic_mock"})
+
+
+class KnowledgeItemUpdate(BaseModel):
+    """Partial update payload for an existing knowledge item."""
+
+    process_type: str | None = None
+    role: str | None = None
+    skills: list[str] | None = None
+    difficulty: str | None = None
+    question: str | None = None
+    follow_ups: list[str] | None = None
+    rubric: list[str] | None = None
+    function_name: str | None = None
+    tests: list[dict[str, Any]] | None = None
+    source: dict[str, Any] | None = None
+    source_confidence: str | None = None
+    is_active: bool | None = None
+
+
+class KnowledgeSource(BaseModel):
+    source_id: str
+    title: str = ""
+    url: str | None = None
+    license: str | None = None
+    source_type: Literal["online", "synthetic_mock", "user_submitted", "official"] = "online"
+    version: str | None = None
+    accessed_at: str | None = None
+    redistribution_allowed: bool = False

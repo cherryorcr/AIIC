@@ -1,0 +1,42 @@
+# 双 RTX 4090 服务器示例。请先安装 NVIDIA Driver + NVIDIA Container Toolkit。
+# 该服务对外表现为 OpenAI-compatible 本地模型网关；只绑定到私网地址。
+services:
+  local-llm:
+    image: vllm/vllm-openai:v0.6.6
+    command:
+      - --model
+      - ${LOCAL_MODEL_ID:-Qwen/Qwen2.5-7B-Instruct}
+      - --served-model-name
+      - ${LOCAL_MODEL_NAME:-local-interview}
+      - --tensor-parallel-size
+      - "2"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    gpus: all
+    ports:
+      - "127.0.0.1:18000:8000"
+    volumes:
+      - model_cache:/root/.cache/huggingface
+    restart: unless-stopped
+
+  model-gateway:
+    image: ghcr.io/berriai/litellm:main-latest
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--host", "0.0.0.0"]
+    environment:
+      LITELLM_MASTER_KEY: ${LOCAL_MODEL_GATEWAY_KEY:?set a private gateway key}
+      LOCAL_MODEL_GATEWAY_KEY: ${LOCAL_MODEL_GATEWAY_KEY:?set a private gateway key}
+    volumes:
+      - ./litellm.config.yaml:/app/config.yaml:ro
+    depends_on:
+      - local-llm
+    ports:
+      # Default is loopback. Set MODEL_GATEWAY_BIND_IP to a private interface or VPN address.
+      - "${MODEL_GATEWAY_BIND_IP:-127.0.0.1}:${MODEL_GATEWAY_PORT:-4000}:4000"
+    restart: unless-stopped
+
+volumes:
+  model_cache:
