@@ -1,0 +1,9 @@
+.git/
+**/__pycache__/
+**/*.py[cod]
+**/.env
+**/.venv/
+**/*.db
+*.docx
+qa_render*/
+
