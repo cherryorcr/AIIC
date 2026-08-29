@@ -1,0 +1,10 @@
+model_list:
+  - model_name: local-interview
+    litellm_params:
+      model: openai/local-interview
+      api_base: http://local-llm:8000/v1
+      api_key: os.environ/LOCAL_MODEL_GATEWAY_KEY
+
+general_settings:
+  disable_spend_logs: true
+  master_key: os.environ/LITELLM_MASTER_KEY
