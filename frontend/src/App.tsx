@@ -97,6 +97,8 @@ type Question = {
   skills: string[];
   difficulty: string;
   source: string;
+  sourceUrl?: string;
+  sourceLicense?: string;
   followUp: string;
   rubric: string[];
   tests?: Array<{
@@ -738,6 +740,8 @@ function backendQuestionToQuestion(
     source: item.source_refs?.length
       ? item.source_refs.join(" · ")
       : fallback?.source || "synthetic_mock",
+    sourceUrl: typeof item.source?.url === "string" ? item.source.url : fallback?.sourceUrl,
+    sourceLicense: typeof item.source?.license === "string" ? item.source.license : fallback?.sourceLicense,
     followUp: item.follow_ups?.join(" ") || fallback?.followUp || "请补充一个具体事实或结果。",
     rubric: item.rubric?.length ? item.rubric : fallback?.rubric || [],
     tests: item.tests || fallback?.tests,
@@ -1074,9 +1078,12 @@ function PracticePage() {
           <div className="question-source">
             <ShieldCheck size={15} />
             <span>{question.source}</span>
-            <button className="text-button" type="button">
-              查看来源
-            </button>
+            {question.sourceUrl ? (
+              <a className="text-button" href={question.sourceUrl} target="_blank" rel="noreferrer">
+                查看来源
+              </a>
+            ) : null}
+            {question.sourceLicense ? <small>{question.sourceLicense}</small> : null}
           </div>
           {activeMode !== "algorithm" ? (
             <>
@@ -2048,6 +2055,12 @@ function QuestionBankPage() {
             <div className="detail-source">
               <ShieldCheck size={15} />
               <span>{selected.source}</span>
+              {selected.sourceUrl ? (
+                <a href={selected.sourceUrl} target="_blank" rel="noreferrer" className="text-button">
+                  来源链接
+                </a>
+              ) : null}
+              {selected.sourceLicense ? <small>{selected.sourceLicense}</small> : null}
             </div>
             <button
               className="primary-button full-button"

@@ -128,7 +128,7 @@ export type TurnResponse = {
 
 export type AlgorithmResult = {
   job_id: string;
-  status: "passed" | "failed" | "timeout" | "error" | "rejected" | "disabled";
+  status: "passed" | "failed" | "timeout" | "error" | "rejected" | "disabled" | "resource_limited";
   passed: number;
   total: number;
   stdout?: string;

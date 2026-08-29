@@ -174,7 +174,7 @@ class AlgorithmRunResponse(BaseModel):
     job_id: str
     session_id: str
     question_id: str
-    status: Literal["passed", "failed", "timeout", "error", "rejected", "disabled"]
+    status: Literal["passed", "failed", "timeout", "error", "rejected", "disabled", "resource_limited"]
     passed: int = 0
     total: int = 0
     stdout: str = ""
