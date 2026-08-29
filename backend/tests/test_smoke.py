@@ -202,3 +202,15 @@ def test_rag_extracts_normalized_skills_and_reports_recall():
     ])
     assert result["cases"] == 1
     assert 0 <= result["recall_at_k"] <= 1
+
+
+def test_session_can_be_completed_and_reported():
+    with TestClient(app) as client:
+        started = client.post("/api/v1/sessions", json={"mode": "technical", "role": "后端工程师"})
+        assert started.status_code == 200
+        sid = started.json()["session_id"]
+        completed = client.post(f"/api/v1/sessions/{sid}/complete")
+        assert completed.status_code == 200
+        assert completed.json()["status"] == "completed"
+        summary = client.get(f"/api/v1/sessions/{sid}")
+        assert summary.json()["session"]["status"] == "completed"
