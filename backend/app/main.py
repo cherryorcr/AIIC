@@ -221,7 +221,10 @@ def list_user_jobs(request: Request, response: Response, limit: int = 100) -> di
 @app.post("/api/v1/jobs")
 def create_user_job(job: JobCreate, request: Request, response: Response) -> dict[str, Any]:
     uid = _resolve_user(request, response)
-    saved = db.save_job(uid, job.model_dump())
+    payload = job.model_dump()
+    if not payload.get("skills"):
+        payload["skills"] = extract_skills(" ".join([payload.get("role", ""), payload.get("title", ""), payload.get("jd_text", "")]))
+    saved = db.save_job(uid, payload)
     return {"job": saved, "status": "saved"}
 
 

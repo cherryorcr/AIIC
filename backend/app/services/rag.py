@@ -149,7 +149,12 @@ class GraphRAGService:
         if source_type in {"synthetic", "synthetic_mock"}:
             return ["synthetic_mock"]
         source_id = source.get("source_id") or source.get("id") or source.get("url")
-        return [str(source_id)] if source_id else []
+        refs = []
+        if source.get("url"):
+            refs.append(str(source["url"]))
+        if source_id and str(source_id) not in refs:
+            refs.append(str(source_id))
+        return refs
 
     def match(
         self,
