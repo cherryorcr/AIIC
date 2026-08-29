@@ -38,6 +38,10 @@ LOCAL_TASKS = {"extract", "embed", "embedding", "rerank", "simple_evaluate"}
 TRANSIENT_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
+def _simple_tokens(text: str) -> set[str]:
+    return {token.lower() for token in re.findall(r"[\w\u4e00-\u9fff]{2,}", str(text or ""))}
+
+
 class ModelRouter:
     """Business-layer entry point for local and hosted model gateways."""
 
@@ -109,8 +113,8 @@ class ModelRouter:
                 "provider": "fallback",
                 "model": "rules",
                 "error": "no_model_configured",
-                "fallback": True,
                 "fallback_reason": "no_model_configured",
+                "fallback": True,
             }
 
         max_retries = max(0, int(getattr(self.settings, "model_max_retries", 2)))
@@ -284,18 +288,58 @@ class ModelRouter:
                     vectors = [entry.get("embedding") for entry in payload.get("data", [])]
                     if len(vectors) != len(texts) or any(not isinstance(v, list) for v in vectors):
                         raise ValueError("invalid_embedding_response")
-                    self._record_invocation(session_id=session_id, task="embed", provider=provider_name, model=model, latency_ms=round((time.perf_counter() - started) * 1000, 2), status="ok", input_tokens=input_tokens, attempt=attempt + 1)
+                    output_tokens = self._usage_tokens(payload, "total_tokens") or self._usage_tokens(payload, "prompt_tokens")
+                    self._record_invocation(session_id=session_id, task="embed", provider=provider_name, model=model, latency_ms=round((time.perf_counter() - started) * 1000, 2), status="ok", input_tokens=input_tokens, output_tokens=output_tokens, cost_usd=self.estimate_cost(provider_name, input_tokens, output_tokens), attempt=attempt + 1)
                     self._mark_provider(provider_name, ok=True)
                     return {"ok": True, "embeddings": vectors, "provider": provider_name, "model": model, "attempts": attempt + 1}
                 except Exception as exc:
                     error = self._error_name(exc, status_code)
-                    self._record_invocation(session_id=session_id, task="embed", provider=provider_name, model=model, latency_ms=round((time.perf_counter() - started) * 1000, 2), status="error", fallback_reason=error, input_tokens=input_tokens, attempt=attempt + 1)
+                    self._record_invocation(session_id=session_id, task="embed", provider=provider_name, model=model, latency_ms=round((time.perf_counter() - started) * 1000, 2), status="error", fallback_reason=error, input_tokens=input_tokens, cost_usd=self.estimate_cost(provider_name, input_tokens, 0), attempt=attempt + 1)
                     self._mark_provider(provider_name, ok=False, error=error)
                     if attempt < int(getattr(self.settings, "model_max_retries", 2)):
                         await asyncio.sleep(min(max(0.0, float(getattr(self.settings, "model_retry_backoff_seconds", .25))) * (2**attempt), 5.0))
         self._record_invocation(session_id=session_id, task="embed", provider="fallback", model="rules", status="fallback", fallback_reason="embedding_unavailable")
         self._mark_provider("fallback", ok=True, error="embedding_unavailable")
         return {"ok": False, "embeddings": [], "provider": "fallback", "error": "embedding_unavailable", "fallback": True}
+
+    async def rerank(self, query: str, documents: list[str], session_id: str | None = None) -> dict[str, Any]:
+        """Use a gateway reranker when available, with deterministic fallback."""
+        if not documents:
+            return {"ok": True, "results": [], "provider": "none", "model": "none"}
+        providers = self._providers("rerank")
+        if httpx is not None:
+            for provider_name, base_url, api_key, model in providers:
+                started = time.perf_counter()
+                headers = {"Content-Type": "application/json"}
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                try:
+                    async with httpx.AsyncClient(timeout=float(getattr(self.settings, "model_timeout_seconds", 30))) as client:
+                        response = await client.post(
+                            f"{base_url.rstrip('/')}/rerank", headers=headers,
+                            json={"model": model, "query": query, "documents": documents, "top_n": len(documents)},
+                        )
+                    response.raise_for_status()
+                    payload = response.json()
+                    values = payload.get("results") or payload.get("data")
+                    if not isinstance(values, list):
+                        raise ValueError("invalid_rerank_response")
+                    normalized = []
+                    for position, item in enumerate(values):
+                        index = int(item.get("index", position))
+                        if not 0 <= index < len(documents):
+                            continue
+                        normalized.append({"index": index, "score": float(item.get("relevance_score", item.get("score", 0))), "text": documents[index]})
+                    input_tokens = self._estimate_tokens_text(query + " " + " ".join(documents))
+                    self._record_invocation(session_id=session_id, task="rerank", provider=provider_name, model=model, latency_ms=round((time.perf_counter() - started) * 1000, 2), status="ok", input_tokens=input_tokens, cost_usd=self.estimate_cost(provider_name, input_tokens, 0), attempt=1)
+                    return {"ok": True, "results": normalized, "provider": provider_name, "model": model}
+                except Exception as exc:
+                    self._record_invocation(session_id=session_id, task="rerank", provider=provider_name, model=model, latency_ms=round((time.perf_counter() - started) * 1000, 2), status="error", fallback_reason=self._error_name(exc, None), attempt=1)
+        query_tokens = _simple_tokens(query)
+        results = [{"index": index, "score": len(query_tokens & _simple_tokens(document)), "text": document} for index, document in enumerate(documents)]
+        results.sort(key=lambda item: item["score"], reverse=True)
+        self._record_invocation(session_id=session_id, task="rerank", provider="fallback", model="rules", latency_ms=0, status="fallback", fallback_reason="reranker_unavailable")
+        return {"ok": False, "results": results, "provider": "fallback", "model": "rules", "fallback": True}
 
     @staticmethod
     def _extract_text(payload: dict[str, Any]) -> str:
