@@ -20,6 +20,7 @@ import {
   listSessionHistory,
   loadFavorites,
   loadUserProfile,
+  completeSession,
   matchSession,
   queueQuestion,
   runAlgorithm,
@@ -813,9 +814,11 @@ function PracticePage() {
   const [questionIndex, setQuestionIndex] = useState(0);
   const [question, setQuestion] = useState<Question>(questions[0]);
   const [nextQuestionData, setNextQuestionData] = useState<Question | null>(null);
+  const [sessionCompleted, setSessionCompleted] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [answer, setAnswer] = useState("");
   const [submitted, setSubmitted] = useState(false);
+  const [algorithmSubmitted, setAlgorithmSubmitted] = useState(false);
   const [feedback, setFeedback] = useState<BackendFeedback | null>(null);
   const [running, setRunning] = useState(false);
   const [runResult, setRunResult] = useState<AlgorithmResult | null>(null);
@@ -834,19 +837,24 @@ function PracticePage() {
     setLoading(true);
     setError("");
     setSubmitted(false);
+    setAlgorithmSubmitted(false);
     setFeedback(null);
     setNextQuestionData(null);
+    setSessionCompleted(false);
     setAnswer("");
     setRunResult(null);
     const fallback = questions.find((item) => item.mode === activeMode) || questions[0];
     setQuestion(fallback);
     const savedProfile = loadUserProfile();
     const requestedSession = searchParams.get("session");
+    const requestedRole = searchParams.get("role") || "后端开发工程师";
+    const requestedJobId = searchParams.get("job_id") || undefined;
     const sessionRequest = requestedSession
       ? getSessionSummary(requestedSession)
       : startSession({
           mode: activeMode,
-          role: "后端开发工程师",
+          role: requestedRole,
+          job_id: requestedJobId,
           job_text: savedProfile.job_text || "Python FastAPI PostgreSQL Redis Docker 系统设计",
           user_profile: {
             skills: savedProfile.skills.length
@@ -896,12 +904,17 @@ function PracticePage() {
       setQuestionIndex(0);
     }
   }
-  function nextQuestion() {
+  function nextQuestion(completeWhenDone = true) {
+    if (completeWhenDone && !nextQuestionData && sessionId) {
+      void completeSession(sessionId).then(() => setSessionCompleted(true)).catch(() => setError("结束训练失败，请稍后重试。"));
+      return;
+    }
     const fallback = questions.find((item) => item.mode === activeMode) || questions[0];
     setQuestion(nextQuestionData || fallback);
     setNextQuestionData(null);
     setQuestionIndex((index) => index + 1);
     setSubmitted(false);
+    setAlgorithmSubmitted(false);
     setFeedback(null);
     setRunResult(null);
     setAnswer("");
@@ -922,6 +935,7 @@ function PracticePage() {
           ? backendQuestionToQuestion(result.next_question, activeMode, question)
           : null,
       );
+      if (!result.next_question) setSessionCompleted(false);
     } catch {
       setError("提交失败，回答已保留在当前页面，请检查后端服务后重试。");
     } finally {
@@ -941,6 +955,21 @@ function PracticePage() {
         tests: question.tests || [],
       });
       setRunResult(result);
+      // Persist the first code run as a turn so algorithm practice appears in
+      // history/reports even though its UI uses the code panel instead of text feedback.
+      if (!algorithmSubmitted) {
+        const turn = await submitTurn(sessionId, {
+          question_id: question.id,
+          answer_text: `算法代码运行结果：${result.passed}/${result.total} 测试通过。`,
+          code,
+          language: "python",
+          tests: question.tests || [],
+        });
+        setAlgorithmSubmitted(true);
+        setNextQuestionData(
+          turn.next_question ? backendQuestionToQuestion(turn.next_question, activeMode, question) : null,
+        );
+      }
     } catch {
       setError("判题服务不可用，请确认后端和算法沙箱已启动。");
     } finally {
@@ -986,6 +1015,7 @@ function PracticePage() {
           </div>
         </div>
       ) : null}
+      {sessionCompleted ? <div className="source-note" role="status"><CheckCircle2 size={16} /><div><strong>本次训练已完成</strong><p>报告已保存到训练历史，可以继续选择其他场景。</p></div></div> : null}
       <section className="mode-switcher">
         {modeMeta.map((item) => {
           const ItemIcon = item.Icon;
@@ -1096,7 +1126,7 @@ function PracticePage() {
                 <strong>判题约束</strong>
                 <span>时间 O(n) · 空间 O(n) · Python 3.11 · 后端固定测试</span>
               </div>
-              <button className="secondary-button" type="button" onClick={nextQuestion}>
+              <button className="secondary-button" type="button" onClick={() => nextQuestion(false)}>
                 换一道题 <ArrowRight size={15} />
               </button>
             </div>
@@ -1390,18 +1420,21 @@ function MatchPage() {
   const [error, setError] = useState("");
   const fallbackRoles = [
     {
+      id: undefined as string | undefined,
       name: "后端开发工程师",
       company: "互联网 / SaaS",
       fallbackSkills: ["Python", "FastAPI", "PostgreSQL", "系统设计"],
       gap: ["分布式一致性", "故障排查"],
     },
     {
+      id: undefined as string | undefined,
       name: "算法工程师",
       company: "AI 基础设施",
       fallbackSkills: ["Python", "算法", "机器学习"],
       gap: ["模型部署", "实验设计"],
     },
     {
+      id: undefined as string | undefined,
       name: "数据分析师",
       company: "消费 / 业务分析",
       fallbackSkills: ["SQL", "指标设计", "Python"],
@@ -1588,7 +1621,7 @@ function MatchPage() {
             <button
               className="primary-button"
               type="button"
-              onClick={() => navigate(`/practice?role=${encodeURIComponent(role.name)}`)}
+              onClick={() => navigate(`/practice?role=${encodeURIComponent(role.name)}${role.id ? `&job_id=${encodeURIComponent(role.id)}` : ""}`)}
             >
               <Sparkles size={16} />
               用此岗位开始训练

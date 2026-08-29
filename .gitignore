@@ -1,7 +1,37 @@
+# Secrets and local configuration
 .env
 .env.*
 !.env.example
+
+# Python
+.venv/
 __pycache__/
 *.py[cod]
-.venv/
+.pytest_cache/
+
+# Runtime databases
+*.db
+*.db-shm
+*.db-wal
+
+# Node / frontend build output
+node_modules/
+dist/
+frontend/output/
+frontend/.playwright-cli/
+frontend/.vite/
+*.log
+
+# Generated artifacts
+*.docx
+qa_render/
+qa_render_updated/
+append_system_design.py
+build_project_plan.py
+
+# IDE / OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
 

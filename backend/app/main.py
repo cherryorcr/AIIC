@@ -64,10 +64,12 @@ app.add_middleware(
 @app.get("/health")
 @app.get("/api/v1/health")
 def health() -> dict[str, Any]:
+    database_ok = db.ping()
     return {
-        "status": "ok",
+        "status": "ok" if database_ok else "degraded",
         "app": "ok",
-        "database": "ok",
+        "database": "ok" if database_ok else "unavailable",
+        "database_backend": "postgresql" if settings.database_url else "sqlite",
         "graph_rag_items": len(rag.items),
         "local_model_configured": bool(settings.local_model_base_url),
         "strong_model_configured": bool(settings.strong_model_base_url and settings.strong_model_api_key),
@@ -417,6 +419,14 @@ async def start_session(request: SessionCreate, http_request: Request, response:
     try:
         payload = request.model_dump()
         payload["user_id"] = _resolve_user(http_request, response, payload.get("user_id"))
+        if payload.get("job_id"):
+            job = db.get_job(str(payload["job_id"]))
+            if job is None or job.get("user_id") not in {None, payload["user_id"]}:
+                raise HTTPException(status_code=404, detail="job_not_found")
+            if not payload.get("job_text"):
+                payload["job_text"] = str(job.get("jd_text") or job.get("job_text") or "")
+            if not payload.get("role") or payload.get("role") == "通用软件开发工程师":
+                payload["role"] = str(job.get("role") or job.get("title") or payload["role"])
         return await interviews.start(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -478,6 +488,14 @@ def get_session(session_id: str) -> dict[str, Any]:
 @app.get("/api/v1/sessions/{session_id}/summary")
 def get_summary(session_id: str) -> dict[str, Any]:
     return get_session(session_id)
+
+
+@app.post("/api/v1/sessions/{session_id}/complete")
+def complete_session(session_id: str) -> dict[str, Any]:
+    try:
+        return interviews.complete(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="session_not_found") from exc
 
 
 @app.get("/api/v1/sessions/{session_id}/events")

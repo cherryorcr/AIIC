@@ -88,6 +88,9 @@ POST   /api/v1/admin/knowledge/reload?prune=false
 python scripts/manage_knowledge.py stats
 python scripts/manage_knowledge.py list --process-type 算法面
 python scripts/manage_knowledge.py reload --prune
+# 校验/导入已确认许可的外部题库（在线来源必须有 URL）
+python scripts/manage_knowledge.py validate --file ../data/approved-dataset.json
+python scripts/manage_knowledge.py import --file ../data/approved-dataset.json
 ```
 
 详细表结构、迁移和真实数据导入规范见 [`docs/database-design.md`](../docs/database-design.md)。

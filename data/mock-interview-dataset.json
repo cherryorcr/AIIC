@@ -1,0 +1,112 @@
+{
+  "dataset_status": "synthetic_mock",
+  "license_note": "仅用于原型开发和 GraphRAG 流程演示，不代表真实来源或真实面试频次。",
+  "items": [
+    {
+      "id": "Q001",
+      "process_type": "技术面",
+      "role": "软件开发/算法",
+      "skills": ["数据结构", "复杂度分析"],
+      "difficulty": "中",
+      "question": "请解释你在一个项目中如何选择数据结构，并说明时间复杂度取舍。",
+      "follow_ups": ["如果数据规模扩大十倍，你会怎么改？"],
+      "rubric": ["能结合真实项目", "能说清复杂度", "能解释取舍"],
+      "source": {"type": "synthetic", "url": null, "collected_at": null}
+    },
+    {
+      "id": "Q002",
+      "process_type": "技术面",
+      "role": "软件开发/算法",
+      "skills": ["系统设计", "故障排查"],
+      "difficulty": "中高",
+      "question": "线上接口延迟突然升高，你会如何定位问题？",
+      "follow_ups": ["监控没有明显异常时，你的下一步是什么？"],
+      "rubric": ["先确认现象", "提出可验证假设", "有回滚或止损方案"],
+      "source": {"type": "synthetic", "url": null, "collected_at": null}
+    },
+    {
+      "id": "Q003",
+      "process_type": "行为面",
+      "role": "软件开发/算法",
+      "skills": ["项目 ownership", "沟通协作"],
+      "difficulty": "中",
+      "question": "讲一个你主动发现并解决问题的项目经历。",
+      "follow_ups": ["如果不解决会造成什么影响？", "你如何证明结果有效？"],
+      "rubric": ["背景清楚", "行动由本人完成", "结果有证据", "有复盘"],
+      "source": {"type": "synthetic", "url": null, "collected_at": null}
+    },
+    {
+      "id": "Q004",
+      "process_type": "行为面",
+      "role": "产品/运营",
+      "skills": ["用户洞察", "优先级决策"],
+      "difficulty": "中",
+      "question": "当用户需求、业务目标和开发资源冲突时，你会怎么排序？",
+      "follow_ups": ["如果数据不足，你如何做决定？"],
+      "rubric": ["明确目标", "提出判断标准", "说明沟通和验证方式"],
+      "source": {"type": "synthetic", "url": null, "collected_at": null}
+    },
+    {
+      "id": "Q005",
+      "process_type": "压力面",
+      "role": "通用校招",
+      "skills": ["抗压", "自我认知"],
+      "difficulty": "中高",
+      "question": "你刚才的回答没有证据，为什么我们要相信你？",
+      "follow_ups": ["请在 30 秒内重新回答。"],
+      "rubric": ["保持冷静", "不防御性争辩", "补充具体事实", "控制时间"],
+      "source": {"type": "synthetic", "url": null, "collected_at": null}
+    },
+    {
+      "id": "Q006",
+      "process_type": "案例面",
+      "role": "数据分析/数据科学",
+      "skills": ["指标设计", "因果分析"],
+      "difficulty": "中高",
+      "question": "某功能上线后活跃率下降，你会如何拆解并验证原因？",
+      "follow_ups": ["哪些分群和对照实验最先看？"],
+      "rubric": ["定义指标", "拆分维度", "区分相关与因果", "提出验证方案"],
+      "source": {"type": "synthetic", "url": null, "collected_at": null}
+    },
+    {
+      "id": "Q007",
+      "process_type": "科研面",
+      "role": "研究生/保研面试",
+      "skills": ["研究设计", "批判性思维"],
+      "difficulty": "中高",
+      "question": "你项目中最关键的假设是什么？如果它不成立，结论会怎样？",
+      "follow_ups": ["你如何设计一个最小验证实验？"],
+      "rubric": ["明确假设", "承认限制", "有替代解释", "验证可执行"],
+      "source": {"type": "synthetic", "url": null, "collected_at": null}
+    },
+    {
+      "id": "Q008",
+      "process_type": "HR面",
+      "role": "通用校招",
+      "skills": ["动机", "岗位匹配"],
+      "difficulty": "低中",
+      "question": "为什么选择这个岗位？你希望在入职后解决什么问题？",
+      "follow_ups": ["为什么不是其他相近岗位？"],
+      "rubric": ["动机具体", "与岗位要求相关", "避免空泛口号"],
+      "source": {"type": "synthetic", "url": null, "collected_at": null}
+    },
+    {
+      "id": "Q009",
+      "process_type": "算法面",
+      "role": "软件开发/算法",
+      "skills": ["滑动窗口", "哈希表", "复杂度分析"],
+      "difficulty": "中",
+      "question": "给定一个字符串，请返回不含重复字符的最长子串长度，并说明时间复杂度。请实现 solution(s)。",
+      "follow_ups": ["如果字符集非常大，如何降低额外空间？"],
+      "rubric": ["边界完整", "复杂度正确", "代码可运行"],
+      "function_name": "solution",
+      "tests": [
+        {"args": ["abcabcbb"], "expected": 3},
+        {"args": ["bbbbb"], "expected": 1},
+        {"args": ["pwwkew"], "expected": 3},
+        {"args": [""], "expected": 0}
+      ],
+      "source": {"type": "synthetic", "url": null, "collected_at": null}
+    }
+  ]
+}
