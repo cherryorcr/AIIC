@@ -818,6 +818,7 @@ function PracticePage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [answer, setAnswer] = useState("");
   const [submitted, setSubmitted] = useState(false);
+  const [algorithmSubmitted, setAlgorithmSubmitted] = useState(false);
   const [feedback, setFeedback] = useState<BackendFeedback | null>(null);
   const [running, setRunning] = useState(false);
   const [runResult, setRunResult] = useState<AlgorithmResult | null>(null);
@@ -836,6 +837,7 @@ function PracticePage() {
     setLoading(true);
     setError("");
     setSubmitted(false);
+    setAlgorithmSubmitted(false);
     setFeedback(null);
     setNextQuestionData(null);
     setSessionCompleted(false);
@@ -912,6 +914,7 @@ function PracticePage() {
     setNextQuestionData(null);
     setQuestionIndex((index) => index + 1);
     setSubmitted(false);
+    setAlgorithmSubmitted(false);
     setFeedback(null);
     setRunResult(null);
     setAnswer("");
@@ -952,6 +955,21 @@ function PracticePage() {
         tests: question.tests || [],
       });
       setRunResult(result);
+      // Persist the first code run as a turn so algorithm practice appears in
+      // history/reports even though its UI uses the code panel instead of text feedback.
+      if (!algorithmSubmitted) {
+        const turn = await submitTurn(sessionId, {
+          question_id: question.id,
+          answer_text: `算法代码运行结果：${result.passed}/${result.total} 测试通过。`,
+          code,
+          language: "python",
+          tests: question.tests || [],
+        });
+        setAlgorithmSubmitted(true);
+        setNextQuestionData(
+          turn.next_question ? backendQuestionToQuestion(turn.next_question, activeMode, question) : null,
+        );
+      }
     } catch {
       setError("判题服务不可用，请确认后端和算法沙箱已启动。");
     } finally {
