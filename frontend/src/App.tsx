@@ -902,8 +902,8 @@ function PracticePage() {
       setQuestionIndex(0);
     }
   }
-  function nextQuestion() {
-    if (!nextQuestionData && sessionId) {
+  function nextQuestion(completeWhenDone = true) {
+    if (completeWhenDone && !nextQuestionData && sessionId) {
       void completeSession(sessionId).then(() => setSessionCompleted(true)).catch(() => setError("结束训练失败，请稍后重试。"));
       return;
     }
@@ -1108,7 +1108,7 @@ function PracticePage() {
                 <strong>判题约束</strong>
                 <span>时间 O(n) · 空间 O(n) · Python 3.11 · 后端固定测试</span>
               </div>
-              <button className="secondary-button" type="button" onClick={nextQuestion}>
+              <button className="secondary-button" type="button" onClick={() => nextQuestion(false)}>
                 换一道题 <ArrowRight size={15} />
               </button>
             </div>
