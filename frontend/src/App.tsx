@@ -842,11 +842,14 @@ function PracticePage() {
     setQuestion(fallback);
     const savedProfile = loadUserProfile();
     const requestedSession = searchParams.get("session");
+    const requestedRole = searchParams.get("role") || "后端开发工程师";
+    const requestedJobId = searchParams.get("job_id") || undefined;
     const sessionRequest = requestedSession
       ? getSessionSummary(requestedSession)
       : startSession({
           mode: activeMode,
-          role: "后端开发工程师",
+          role: requestedRole,
+          job_id: requestedJobId,
           job_text: savedProfile.job_text || "Python FastAPI PostgreSQL Redis Docker 系统设计",
           user_profile: {
             skills: savedProfile.skills.length
@@ -1588,7 +1591,7 @@ function MatchPage() {
             <button
               className="primary-button"
               type="button"
-              onClick={() => navigate(`/practice?role=${encodeURIComponent(role.name)}`)}
+              onClick={() => navigate(`/practice?role=${encodeURIComponent(role.name)}${role.id ? `&job_id=${encodeURIComponent(role.id)}` : ""}`)}
             >
               <Sparkles size={16} />
               用此岗位开始训练

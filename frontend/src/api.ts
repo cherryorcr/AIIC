@@ -153,6 +153,7 @@ async function request<T>(
     try {
       const response = await fetch(path, {
         ...init,
+        credentials: "include",
         signal: controller.signal,
         headers: {
           "Content-Type": "application/json",
@@ -217,6 +218,7 @@ export function startSession(input: {
   job_text: string;
   user_profile: { skills: string[]; projects: string[] };
   difficulty?: "easy" | "medium" | "hard";
+  job_id?: string;
 }) {
   return request<StartSessionResponse>(
     "/api/v1/sessions",
@@ -287,7 +289,7 @@ export function matchSession(sessionId: string, filters: Record<string, unknown>
   );
 }
 
-/** Knowledge endpoint currently lives under admin namespace in the MVP backend. */
+/** Public question-bank search; management endpoints remain admin-only. */
 export async function listKnowledgeItems(
   options: { processType?: string; query?: string; limit?: number } = {},
 ) {
@@ -295,23 +297,10 @@ export async function listKnowledgeItems(
   if (options.processType) params.set("process_type", options.processType);
   if (options.query?.trim()) params.set("q", options.query.trim());
   params.set("limit", String(options.limit ?? 200));
-  try {
-    const result = await request<{ items: BackendQuestion[] }>(
-      `/api/v1/admin/knowledge/items?${params.toString()}`,
-    );
-    return result.items || [];
-  } catch (error) {
-    // A future public /questions endpoint can be enabled without changing UI code.
-    if ((error as ApiError).status === 404) {
-      const result = await request<{ items: BackendQuestion[] }>(
-        `/api/v1/questions?${params.toString()}`,
-        undefined,
-        { retries: 0 },
-      );
-      return result.items || [];
-    }
-    throw error;
-  }
+  const result = await request<{ items: BackendQuestion[] }>(
+    `/api/v1/questions?${params.toString()}`,
+  );
+  return result.items || [];
 }
 
 export function getSessionSummary(sessionId: string) {
