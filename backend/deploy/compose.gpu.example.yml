@@ -1,0 +1,28 @@
+# 双 RTX 4090 服务器示例。请先安装 NVIDIA Driver + NVIDIA Container Toolkit。
+# 该服务对外表现为 OpenAI-compatible 本地模型网关；只绑定到私网地址。
+services:
+  local-llm:
+    image: vllm/vllm-openai:v0.6.6
+    command:
+      - --model
+      - ${LOCAL_MODEL_ID:-Qwen/Qwen2.5-7B-Instruct}
+      - --served-model-name
+      - ${LOCAL_MODEL_NAME:-local-interview}
+      - --tensor-parallel-size
+      - "2"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    gpus: all
+    ports:
+      - "8000:8000"
+    volumes:
+      - model_cache:/root/.cache/huggingface
+    restart: unless-stopped
+
+volumes:
+  model_cache:
+
