@@ -635,6 +635,15 @@ class Database:
         with self._lock:
             self._conn.close()
 
+    def ping(self) -> bool:
+        """Check the configured database without exposing connection details."""
+        try:
+            with self._lock:
+                self._conn.execute("SELECT 1").fetchone()
+            return True
+        except Exception:
+            return False
+
     def save_session(self, payload: dict[str, Any]) -> None:
         now = utc_now()
         with self._lock, self._conn:
