@@ -781,10 +781,17 @@ class Database:
 
     def save_job(self, user_id: str | None, job: dict[str, Any]) -> dict[str, Any]:
         """Persist a user's target role/JD and normalized skills."""
-        import uuid
-
         payload = dict(job or {})
-        job_id = str(payload.get("id") or payload.get("job_id") or f"job-{uuid.uuid4().hex}")
+        if payload.get("id") or payload.get("job_id"):
+            job_id = str(payload.get("id") or payload.get("job_id"))
+        else:
+            # Re-saving the same target JD is idempotent; distinct JDs still
+            # receive separate records for the user's comparison history.
+            fingerprint = "|".join([
+                str(user_id or ""), str(payload.get("title") or payload.get("name") or ""),
+                str(payload.get("role") or ""), str(payload.get("jd_text") or payload.get("job_text") or ""),
+            ])
+            job_id = f"job-{hashlib.sha1(fingerprint.encode('utf-8')).hexdigest()[:16]}"
         if user_id and not self.get_user(user_id):
             self.create_temp_user(user_id)
         now = utc_now()
