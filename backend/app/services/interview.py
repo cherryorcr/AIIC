@@ -187,6 +187,35 @@ class InterviewService:
         average = round(sum(score_values) / len(score_values), 2) if score_values else None
         return {"session": session, "turns": turns, "summary": {"turn_count": len(turns), "average_score": average}}
 
+    def complete(self, session_id: str) -> dict[str, Any]:
+        """Mark a session complete and persist its final report snapshot."""
+        session = self.db.get_session(session_id)
+        if not session:
+            raise KeyError("session_not_found")
+        session["status"] = "completed"
+        session["current_question"] = None
+        self.db.save_session(session)
+        turns = self.db.list_turns(session_id)
+        values = [
+            float(value)
+            for turn in turns
+            for value in ((turn.get("feedback") or {}).get("scores") or {}).values()
+            if isinstance(value, (int, float))
+        ]
+        report = None
+        if session.get("user_id"):
+            report = self.db.save_report(
+                session["user_id"], session_id,
+                {
+                    "title": f"{session.get('role', '岗位')} · {session.get('mode', 'technical')}",
+                    "turn_count": len(turns),
+                    "average_score": round(sum(values) / len(values), 2) if values else None,
+                    "status": "completed",
+                },
+                report_id=f"report-{session_id}",
+            )
+        return {"session": session, "report": report, "turn_count": len(turns), "status": "completed"}
+
     @staticmethod
     def _why(question: dict[str, Any], matched_skills: list[str], mode_name: str) -> str:
         skills = "、".join(question.get("skills") or matched_skills[:3]) or "岗位通用能力"

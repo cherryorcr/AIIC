@@ -20,6 +20,7 @@ import {
   listSessionHistory,
   loadFavorites,
   loadUserProfile,
+  completeSession,
   matchSession,
   queueQuestion,
   runAlgorithm,
@@ -813,6 +814,7 @@ function PracticePage() {
   const [questionIndex, setQuestionIndex] = useState(0);
   const [question, setQuestion] = useState<Question>(questions[0]);
   const [nextQuestionData, setNextQuestionData] = useState<Question | null>(null);
+  const [sessionCompleted, setSessionCompleted] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [answer, setAnswer] = useState("");
   const [submitted, setSubmitted] = useState(false);
@@ -836,6 +838,7 @@ function PracticePage() {
     setSubmitted(false);
     setFeedback(null);
     setNextQuestionData(null);
+    setSessionCompleted(false);
     setAnswer("");
     setRunResult(null);
     const fallback = questions.find((item) => item.mode === activeMode) || questions[0];
@@ -900,6 +903,10 @@ function PracticePage() {
     }
   }
   function nextQuestion() {
+    if (!nextQuestionData && sessionId) {
+      void completeSession(sessionId).then(() => setSessionCompleted(true)).catch(() => setError("结束训练失败，请稍后重试。"));
+      return;
+    }
     const fallback = questions.find((item) => item.mode === activeMode) || questions[0];
     setQuestion(nextQuestionData || fallback);
     setNextQuestionData(null);
@@ -925,6 +932,7 @@ function PracticePage() {
           ? backendQuestionToQuestion(result.next_question, activeMode, question)
           : null,
       );
+      if (!result.next_question) setSessionCompleted(false);
     } catch {
       setError("提交失败，回答已保留在当前页面，请检查后端服务后重试。");
     } finally {
@@ -989,6 +997,7 @@ function PracticePage() {
           </div>
         </div>
       ) : null}
+      {sessionCompleted ? <div className="source-note" role="status"><CheckCircle2 size={16} /><div><strong>本次训练已完成</strong><p>报告已保存到训练历史，可以继续选择其他场景。</p></div></div> : null}
       <section className="mode-switcher">
         {modeMeta.map((item) => {
           const ItemIcon = item.Icon;
@@ -1393,18 +1402,21 @@ function MatchPage() {
   const [error, setError] = useState("");
   const fallbackRoles = [
     {
+      id: undefined as string | undefined,
       name: "后端开发工程师",
       company: "互联网 / SaaS",
       fallbackSkills: ["Python", "FastAPI", "PostgreSQL", "系统设计"],
       gap: ["分布式一致性", "故障排查"],
     },
     {
+      id: undefined as string | undefined,
       name: "算法工程师",
       company: "AI 基础设施",
       fallbackSkills: ["Python", "算法", "机器学习"],
       gap: ["模型部署", "实验设计"],
     },
     {
+      id: undefined as string | undefined,
       name: "数据分析师",
       company: "消费 / 业务分析",
       fallbackSkills: ["SQL", "指标设计", "Python"],

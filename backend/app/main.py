@@ -490,6 +490,14 @@ def get_summary(session_id: str) -> dict[str, Any]:
     return get_session(session_id)
 
 
+@app.post("/api/v1/sessions/{session_id}/complete")
+def complete_session(session_id: str) -> dict[str, Any]:
+    try:
+        return interviews.complete(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="session_not_found") from exc
+
+
 @app.get("/api/v1/sessions/{session_id}/events")
 def session_events(session_id: str) -> StreamingResponse:
     if not db.get_session(session_id):

@@ -307,6 +307,13 @@ export function getSessionSummary(sessionId: string) {
   return request<SessionSummary>(`/api/v1/sessions/${encodeURIComponent(sessionId)}`);
 }
 
+export function completeSession(sessionId: string) {
+  return request<{ status: string; session?: SessionSummary }>(
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/complete`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+}
+
 export async function listJobs(limit = 100): Promise<JobRecord[]> {
   const result = await request<{ jobs?: JobRecord[] }>(
     `/api/v1/jobs?limit=${Math.max(1, Math.min(limit, 500))}`,
