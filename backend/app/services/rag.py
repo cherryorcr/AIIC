@@ -44,7 +44,27 @@ MODE_TO_PROCESS = {
     "case": "案例面",
     "research": "科研面",
     "hr": "HR面",
+    "group": "群面",
 }
+
+
+GROUP_ITEMS: list[dict[str, Any]] = [
+    {
+        "id": "Q-GROUP-001",
+        "process_type": "群面",
+        "role": "通用岗位",
+        "skills": ["问题拆解", "沟通协作", "共识推动", "时间管理"],
+        "difficulty": "中高",
+        "question": "某团队需要在有限预算下决定下一季度最值得投入的产品方向。请在 10 分钟内统一目标、提出评估指标并达成可执行的优先级结论。",
+        "follow_ups": [
+            "模拟队友认为应优先满足最大客户的需求，请回应并推动小组形成共同判断。",
+            "还剩 2 分钟，请总结最终方案、关键依据和未决风险。",
+        ],
+        "rubric": ["先澄清目标与约束", "主动倾听并整合观点", "用事实推动共识", "控制讨论节奏并形成结论"],
+        "source": {"type": "synthetic_mock", "url": None},
+        "source_confidence": "synthetic_mock",
+    }
+]
 
 KNOWN_SKILLS = {
     "python", "java", "go", "c++", "sql", "fastapi", "postgresql", "redis", "docker",
@@ -78,7 +98,14 @@ def extract_skills(text: str, candidate_skills: set[str] | None = None) -> list[
     for skill in candidates:
         canonical = normalize_skill(skill)
         aliases = [canonical, *[alias for alias, target in SKILL_ALIASES.items() if target == canonical]]
-        if any(alias in lowered for alias in aliases) and canonical not in found:
+        def contains_alias(alias: str) -> bool:
+            # ASCII skill names need token boundaries: SQL is not present in
+            # PostgreSQL, and Go should not match words such as "good".
+            if re.fullmatch(r"[a-z0-9+#. -]+", alias):
+                return re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", lowered) is not None
+            return alias in lowered
+
+        if any(contains_alias(alias) for alias in aliases) and canonical not in found:
             found.append(canonical)
     return found
 
@@ -107,9 +134,18 @@ class GraphRAGService:
         try:
             payload = json.loads(self.dataset_path.read_text(encoding="utf-8"))
             items = payload.get("items", [])
-            return self._dedupe(items or DEFAULT_ITEMS)
+            # Group discussion is an application-specific simulation layer;
+            # keep one clearly labelled synthetic scenario available even when
+            # the imported public question set has no group-interview records.
+            if not any(isinstance(item, dict) and item.get("process_type") == "群面" for item in items):
+                items = [*items, *GROUP_ITEMS]
+            return self._dedupe(items or [*DEFAULT_ITEMS, *GROUP_ITEMS])
         except (OSError, ValueError, TypeError):
-            return self._dedupe(DEFAULT_ITEMS)
+            # Keep every supported scene usable even if the optional dataset
+            # file is missing or malformed. The group prompt is an
+            # application-owned simulation and must not disappear with the
+            # external dataset.
+            return self._dedupe([*DEFAULT_ITEMS, *GROUP_ITEMS])
 
     @staticmethod
     def _dedupe(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -118,26 +154,64 @@ class GraphRAGService:
         for item in items:
             if not isinstance(item, dict):
                 continue
-            normalized = re.sub(r"\s+", "", str(item.get("question", "")).strip().lower())
-            fingerprint = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-            if not normalized or fingerprint in seen:
+            signature = GraphRAGService._question_signature(item)
+            if not signature or signature in seen:
                 continue
-            seen.add(fingerprint)
+            seen.add(signature)
             copy = dict(item)
             copy["skills"] = list(dict.fromkeys(normalize_skill(x) for x in item.get("skills", []) if str(x).strip()))
             result.append(copy)
         return result
+
+    @staticmethod
+    def _question_signature(item: dict[str, Any]) -> str:
+        """Return a stable topic key so paraphrases do not become duplicates.
+
+        Exact text hashes miss common variants such as a translated prompt
+        with an added ``solution(s)`` instruction. Known algorithm families get
+        explicit keys; other questions fall back to normalized content.
+        """
+        process = str(item.get("process_type") or "").strip().lower()
+        text = str(item.get("question") or "").lower()
+        text = re.sub(r"[（(][^）)]{0,80}(?:依据|source|转载|转写|leetcode)[^）)]*[）)]", " ", text, flags=re.I)
+        text = re.sub(r"[^a-z0-9+#\u4e00-\u9fff]+", " ", text)
+        algorithm_topics = [
+            ("two_sum", (r"two sum", r"两数之和", r"和为 target")),
+            ("stock_profit", (r"stock", r"股票价格", r"最大利润")),
+            ("product_except_self", (r"product except", r"除 nums\s*\[?i\]?", r"除.*元素.*乘积")),
+            ("maximum_subarray", (r"maximum subarray", r"最大子数组", r"连续子数组.*最大和")),
+            ("contains_duplicate", (r"contains duplicate", r"存在重复元素", r"判断.*重复")),
+            ("rotated_search", (r"rotated.*array", r"旋转.*数组.*target", r"旋转后.*下标")),
+            ("climbing_stairs", (r"climbing stairs", r"爬楼梯", r"1.*2.*阶")),
+            ("coin_change", (r"coin change", r"硬币面额", r"最少硬币")),
+            ("number_of_islands", (r"number of islands", r"岛屿数量", r"0 1.*网格")),
+            ("course_schedule", (r"course schedule", r"课程.*先修", r"完成所有课程")),
+            ("reverse_linked_list", (r"reverse linked list", r"链表.*反转", r"原地反转")),
+            ("valid_parentheses", (r"valid parentheses", r"括号.*有效", r"括号.*闭合")),
+            ("merge_intervals", (r"merge intervals", r"合并.*区间", r"重叠.*区间")),
+            ("longest_substring_without_repeat", (r"longest.*substring", r"最长.*子串", r"不含重复.*字符")),
+            ("top_k_frequent", (r"top k", r"频率最高.*k", r"出现频率.*元素")),
+            ("maximum_depth_tree", (r"maximum depth", r"二叉树.*最大深度", r"二叉树.*深度")),
+            ("generate_parentheses", (r"generate parentheses", r"生成.*括号", r"n 对括号")),
+        ]
+        for topic, patterns in algorithm_topics:
+            if any(re.search(pattern, text, flags=re.I) for pattern in patterns):
+                return f"{process}:{topic}"
+        tokens = re.findall(r"[a-z][a-z0-9+#]*|[\u4e00-\u9fff]{2,8}", text)
+        stop_words = {"给定", "请实现", "说明", "并", "以及", "如何", "一个", "返回", "问题", "时间复杂度", "solution"}
+        normalized = " ".join(sorted({token for token in tokens if token not in stop_words}))
+        return f"{process}:{hashlib.sha256(normalized.encode('utf-8')).hexdigest()[:20]}" if normalized else ""
 
     def attach_db(self, db: Database) -> None:
         self.db = db
         persisted = db.list_questions()
         # An initialized database is authoritative even when it currently has
         # zero active questions (for example after an explicit prune).
-        self.items = persisted
+        self.items = self._dedupe(persisted)
 
     def reload(self) -> int:
         if self.db is not None:
-            self.items = self.db.list_questions()
+            self.items = self._dedupe(self.db.list_questions())
             return len(self.items)
         self.items = self._load()
         return len(self.items)

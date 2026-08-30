@@ -218,13 +218,28 @@ class Database:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS group_messages (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    speaker TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT '',
+                    message TEXT NOT NULL,
+                    group_phase TEXT NOT NULL DEFAULT '',
+                    next_delay_seconds INTEGER NOT NULL DEFAULT 8,
+                    provider TEXT NOT NULL DEFAULT 'fallback',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                );
                 CREATE TABLE IF NOT EXISTS turns (
                     id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL,
                     question_id TEXT NOT NULL,
+                    question_text TEXT NOT NULL DEFAULT '',
                     answer_text TEXT NOT NULL,
                     code TEXT,
                     language TEXT,
+                    parent_turn_id TEXT,
+                    answer_mode TEXT NOT NULL DEFAULT 'answer',
                     algorithm_result_json TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(session_id) REFERENCES sessions(id)
@@ -357,6 +372,20 @@ class Database:
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
                 );
+                CREATE TABLE IF NOT EXISTS match_snapshots (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    target_key TEXT NOT NULL,
+                    input_hash TEXT NOT NULL,
+                    scoring_version TEXT NOT NULL,
+                    score INTEGER NOT NULL,
+                    source TEXT NOT NULL,
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                    UNIQUE(user_id, target_key, input_hash, scoring_version)
+                );
                 CREATE TABLE IF NOT EXISTS question_favorites (
                     user_id TEXT NOT NULL,
                     question_id TEXT NOT NULL,
@@ -393,7 +422,9 @@ class Database:
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
+                CREATE INDEX IF NOT EXISTS idx_group_messages_session_created ON group_messages(session_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs(user_id, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_match_snapshots_lookup ON match_snapshots(user_id, target_key, input_hash, scoring_version);
                 CREATE INDEX IF NOT EXISTS idx_reports_user ON reports(user_id, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_feedback_turn ON feedback(turn_id);
                 CREATE INDEX IF NOT EXISTS idx_questions_process ON questions(process_type);
@@ -412,6 +443,9 @@ class Database:
             self._ensure_column(self._conn, "questions", "is_active", "INTEGER NOT NULL DEFAULT 1")
             self._ensure_column(self._conn, "sessions", "user_id", "TEXT")
             self._ensure_column(self._conn, "sessions", "job_id", "TEXT")
+            self._ensure_column(self._conn, "turns", "question_text", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(self._conn, "turns", "parent_turn_id", "TEXT")
+            self._ensure_column(self._conn, "turns", "answer_mode", "TEXT NOT NULL DEFAULT 'answer'")
             self._ensure_column(self._conn, "users", "display_name", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, "users", "email", "TEXT")
             self._ensure_column(self._conn, "users", "password_hash", "TEXT")
@@ -460,6 +494,14 @@ class Database:
             self._conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, description, applied_at) VALUES (?, ?, ?)",
                 (6, "registered accounts and hashed authentication sessions", utc_now()),
+            )
+            self._conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, description, applied_at) VALUES (?, ?, ?)",
+                (7, "persisted resume and job match score snapshots", utc_now()),
+            )
+            self._conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, description, applied_at) VALUES (?, ?, ?)",
+                (8, "autonomous group discussion messages", utc_now()),
             )
 
     def seed_questions(self, items: list[dict[str, Any]], *, prune: bool = False) -> int:
@@ -744,6 +786,45 @@ class Database:
             result["user_profile"] = decode_json(result.pop("profile_json"), {})
             result["current_question"] = decode_json(result.pop("current_question_json"), None)
             result["matched_skills"] = decode_json(result.pop("matched_skills_json"), [])
+            return result
+
+    def save_group_message(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO group_messages
+                (id, session_id, speaker, role, message, group_phase, next_delay_seconds, provider, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    speaker=excluded.speaker, role=excluded.role, message=excluded.message,
+                    group_phase=excluded.group_phase, next_delay_seconds=excluded.next_delay_seconds,
+                    provider=excluded.provider
+                """,
+                (
+                    payload["message_id"], payload["session_id"], payload.get("speaker", "模拟队友"),
+                    payload.get("role", ""), payload.get("message", ""), payload.get("group_phase", ""),
+                    int(payload.get("next_delay_seconds", 8)), payload.get("provider", "fallback"),
+                    payload.get("created_at", utc_now()),
+                ),
+            )
+        return dict(payload)
+
+    def list_group_messages(self, session_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, session_id, speaker, role, message, group_phase,
+                       next_delay_seconds, provider, created_at
+                FROM group_messages WHERE session_id = ?
+                ORDER BY created_at ASC LIMIT ?
+                """,
+                (session_id, max(1, min(int(limit), 500))),
+            ).fetchall()
+            result = []
+            for row in rows:
+                item = dict(row)
+                item["message_id"] = item.pop("id")
+                result.append(item)
             return result
 
     # ------------------------------------------------------------------
@@ -1116,6 +1197,75 @@ class Database:
                 result.append(payload)
             return result
 
+    def get_match_snapshot(
+        self,
+        user_id: str,
+        target_key: str,
+        input_hash: str,
+        scoring_version: str,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM match_snapshots
+                WHERE user_id = ? AND target_key = ? AND input_hash = ? AND scoring_version = ?
+                LIMIT 1
+                """,
+                (user_id, target_key, input_hash, scoring_version),
+            ).fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            payload = decode_json(item.pop("payload_json"), {})
+            payload.update(item)
+            return payload
+
+    def save_match_snapshot(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Persist one immutable score for a specific resume/JD input hash."""
+        user_id = str(payload["user_id"])
+        if not self.get_user(user_id):
+            self.create_temp_user(user_id)
+        fingerprint = "|".join(
+            [
+                user_id,
+                str(payload["target_key"]),
+                str(payload["input_hash"]),
+                str(payload["scoring_version"]),
+            ]
+        )
+        snapshot_id = str(payload.get("id") or stable_id("match", fingerprint, 20))
+        now = utc_now()
+        score = min(100, max(0, int(round(float(payload.get("match_score", payload.get("score", 0)))))))
+        stored = dict(payload)
+        stored["match_score"] = score
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO match_snapshots
+                (id, user_id, target_key, input_hash, scoring_version, score, source, payload_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
+                """,
+                (
+                    snapshot_id,
+                    user_id,
+                    payload["target_key"],
+                    payload["input_hash"],
+                    payload["scoring_version"],
+                    score,
+                    str(payload.get("score_source") or payload.get("source") or "deterministic"),
+                    json.dumps(stored, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+        return self.get_match_snapshot(
+            user_id,
+            str(payload["target_key"]),
+            str(payload["input_hash"]),
+            str(payload["scoring_version"]),
+        ) or {"id": snapshot_id, **stored, "created_at": now, "updated_at": now}
+
     def favorite_question(self, user_id: str, question_id: str) -> bool:
         if not self.get_user(user_id):
             self.create_temp_user(user_id)
@@ -1201,9 +1351,16 @@ class Database:
             if user_id:
                 where = " WHERE user_id = ?"
                 params.append(user_id)
-            params.append(max(1, min(int(limit), 500)))
             rows = self._conn.execute(
-                f"SELECT * FROM reports{where} ORDER BY created_at DESC LIMIT ?", params
+                f"""
+                SELECT * FROM reports{where}
+                {"AND" if where else "WHERE"}
+                (session_id IS NULL OR EXISTS (
+                    SELECT 1 FROM turns WHERE turns.session_id = reports.session_id
+                ))
+                ORDER BY created_at DESC LIMIT ?
+                """,
+                [*params, max(1, min(int(limit), 500))],
             ).fetchall()
             result = []
             for row in rows:
@@ -1219,7 +1376,12 @@ class Database:
         sessions = []
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?",
+                """
+                SELECT * FROM sessions
+                WHERE user_id = ?
+                  AND EXISTS (SELECT 1 FROM turns WHERE turns.session_id = sessions.id)
+                ORDER BY updated_at DESC LIMIT ?
+                """,
                 (user_id, max(1, min(int(limit), 500))),
             ).fetchall()
             for row in rows:
@@ -1255,20 +1417,25 @@ class Database:
             self._conn.execute(
                 """
                 INSERT INTO turns
-                (id, session_id, question_id, answer_text, code, language, algorithm_result_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (id, session_id, question_id, question_text, answer_text, code, language, parent_turn_id, answer_mode, algorithm_result_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     session_id=excluded.session_id, question_id=excluded.question_id,
+                    question_text=excluded.question_text,
                     answer_text=excluded.answer_text, code=excluded.code, language=excluded.language,
+                    parent_turn_id=excluded.parent_turn_id, answer_mode=excluded.answer_mode,
                     algorithm_result_json=excluded.algorithm_result_json, created_at=excluded.created_at
                 """,
                 (
                     payload["turn_id"],
                     payload["session_id"],
                     payload["question_id"],
+                    payload.get("question_text", ""),
                     payload.get("answer_text", ""),
                     payload.get("code"),
                     payload.get("language"),
+                    payload.get("parent_turn_id"),
+                    payload.get("answer_mode", "answer"),
                     json.dumps(payload.get("algorithm_result"), ensure_ascii=False),
                     payload.get("created_at", utc_now()),
                 ),
@@ -1313,6 +1480,25 @@ class Database:
                 "ORDER BY created_at DESC LIMIT 1",
                 (session_id, question_id),
             ).fetchone()
+            if row is None:
+                return None
+            item = dict(row)
+            item["algorithm_result"] = decode_json(item.pop("algorithm_result_json"), None)
+            feedback = self._conn.execute(
+                "SELECT payload_json FROM feedback WHERE turn_id = ?", (item["id"],)
+            ).fetchone()
+            item["feedback"] = decode_json(feedback[0], {}) if feedback else None
+            return item
+
+    def get_turn(self, turn_id: str, session_id: str | None = None) -> dict[str, Any] | None:
+        """Return one persisted answer, optionally constrained to its session."""
+        with self._lock:
+            if session_id:
+                row = self._conn.execute(
+                    "SELECT * FROM turns WHERE id = ? AND session_id = ?", (turn_id, session_id)
+                ).fetchone()
+            else:
+                row = self._conn.execute("SELECT * FROM turns WHERE id = ?", (turn_id,)).fetchone()
             if row is None:
                 return None
             item = dict(row)

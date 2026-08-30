@@ -17,6 +17,7 @@ from app.schemas.models import (
     AccountRegister,
     AnswerRequest,
     DocumentConfirmRequest,
+    GroupDiscussionAdvance,
     KnowledgeItemCreate,
     KnowledgeItemUpdate,
     JobCreate,
@@ -24,6 +25,7 @@ from app.schemas.models import (
     MatchRequest,
     SessionCreate,
     TemporaryUserCreate,
+    UserProfile,
     UserProfileUpdate,
 )
 from app.services.interview import InterviewService
@@ -36,6 +38,16 @@ from app.services.auth import (
 )
 from app.services.documents import ALLOWED_EXTENSIONS, extract_document_text, parse_document
 from app.services.model_router import ModelRouter
+from app.services.matching import (
+    MATCH_SCORING_VERSION,
+    build_match_context,
+    deterministic_match_snapshot,
+    match_input_hash,
+    match_score_prompt,
+    match_score_schema,
+    match_target_key,
+    model_match_snapshot,
+)
 from app.services.prompts import SCENE_POLICIES
 from app.services.rag import GraphRAGService, MODE_TO_PROCESS, extract_skills
 from app.services.sandbox import SandboxService
@@ -111,19 +123,78 @@ def list_scenes() -> dict[str, Any]:
 
 
 @app.post("/api/v1/matches")
-def preview_match(request: SessionCreate) -> dict[str, Any]:
-    """Preview role/skill/question matching without creating an interview session."""
+async def preview_match(request: SessionCreate, http_request: Request, response: Response) -> dict[str, Any]:
+    """Return a durable resume/JD score plus a live question-bank preview."""
+    user_id = _resolve_user(http_request, response)
+    role = request.role
+    job_text = request.job_text
+    profile_payload = request.user_profile.model_dump()
+    job_skills: list[str] = []
+    if request.job_id:
+        job = db.get_job(str(request.job_id))
+        if job is None or job.get("user_id") != user_id:
+            raise HTTPException(status_code=404, detail="job_not_found")
+        # A saved role owns its canonical JD. Client-side drafts must not
+        # silently change a persisted score when a user switches list items.
+        job_text = str(job.get("jd_text") or job.get("job_text") or "")
+        role = str(job.get("role") or job.get("title") or role)
+        job_skills = [str(value) for value in job.get("skills") or []]
+    stored_profile = db.get_user_profile(user_id)
+    if stored_profile is not None:
+        # Scores for saved materials always use the server-confirmed resume,
+        # not a possibly stale localStorage copy submitted by the browser. An
+        # intentionally cleared profile is canonical as well.
+        profile_payload = stored_profile
+    context = build_match_context(
+        role=role,
+        job_text=job_text,
+        job_skills=job_skills,
+        profile=profile_payload,
+    )
     matched = rag.match(
         mode=request.mode,
-        role=request.role,
-        job_text=request.job_text,
-        profile=request.user_profile.model_dump(),
+        role=role,
+        job_text=job_text,
+        profile=profile_payload,
         difficulty=request.difficulty,
     )
     questions = matched.get("questions", [])
-    # This is deliberately an explainable heuristic score for the MVP; a
-    # configured model can later replace it without changing the response shape.
-    score = min(100, max(0, 50 + len(matched.get("matched_skills", [])) * 5 + min(len(questions), 5) * 2))
+
+    input_hash = match_input_hash(context)
+    target_key = match_target_key(role, job_text, str(request.job_id) if request.job_id else None)
+    snapshot = db.get_match_snapshot(user_id, target_key, input_hash, MATCH_SCORING_VERSION)
+    score_cached = snapshot is not None
+    if snapshot is None:
+        score_payload = deterministic_match_snapshot(context)
+        if job_text.strip() or context["required_skills"]:
+            generated = await router.complete(
+                "match_score",
+                match_score_prompt(context, questions, request.mode),
+                response_schema=match_score_schema(),
+                temperature=0,
+                max_tokens=2400,
+            )
+            if generated.get("ok"):
+                parsed = router.parse_json(str(generated.get("text") or ""))
+                if parsed:
+                    score_payload = model_match_snapshot(
+                        context,
+                        parsed,
+                        questions,
+                        provider=str(generated.get("provider") or "strong_model"),
+                    )
+        snapshot = db.save_match_snapshot(
+            {
+                "user_id": user_id,
+                "target_key": target_key,
+                "input_hash": input_hash,
+                "scoring_version": MATCH_SCORING_VERSION,
+                **score_payload,
+            }
+        )
+    personalized = snapshot.get("personalized_questions")
+    if isinstance(personalized, list) and personalized:
+        questions = personalized
     confidences = [str(question.get("source_confidence") or "").lower() for question in questions]
     if any(value == "synthetic_mock" for value in confidences):
         source_confidence = "synthetic_mock"
@@ -134,10 +205,24 @@ def preview_match(request: SessionCreate) -> dict[str, Any]:
     else:
         source_confidence = "observed"
     return {
-        "role": request.role,
-        "match_score": score,
+        "role": role,
+        "match_score": int(snapshot.get("match_score", snapshot.get("score", 0))),
+        "score_breakdown": snapshot.get("score_breakdown", {}),
+        "score_explanation": snapshot.get("score_explanation", ""),
+        "score_strengths": snapshot.get("score_strengths", []),
+        "score_gaps": snapshot.get("score_gaps", context["skill_gaps"]),
+        "score_source": snapshot.get("score_source", snapshot.get("source", "deterministic")),
+        "score_cached": score_cached,
+        "score_snapshot_id": snapshot.get("id"),
+        "score_updated_at": snapshot.get("updated_at") or snapshot.get("created_at"),
+        "scoring_version": MATCH_SCORING_VERSION,
+        "required_skills": context["required_skills"],
+        "profile_matched_skills": context["profile_matched_skills"],
         "matched_skills": matched.get("matched_skills", []),
         "questions": questions,
+        "question_generation_source": (
+            "strong_model" if any(question.get("personalized") for question in questions) else "question_bank"
+        ),
         "source_confidence": source_confidence,
     }
 
@@ -163,6 +248,10 @@ def public_questions(
     # user-facing Chinese stage labels. Accept both at the API boundary.
     process_type = MODE_TO_PROCESS.get(process_type or "", process_type)
     items = db.list_questions(process_type=process_type, limit=max(1, min(limit, 500)))
+    # A legacy database may still contain an older ID for the same conceptual
+    # prompt. Apply the same semantic de-duplication used by GraphRAG before
+    # exposing the public question bank.
+    items = rag._dedupe(items)
     normalized_query = (query or q or "").strip().lower()
     normalized_skill = (skill or "").strip().lower()
     if normalized_query or normalized_skill:
@@ -560,6 +649,11 @@ def get_user_report(report_id: str, request: Request, response: Response) -> dic
     report = db.get_report(report_id)
     if report is None or report.get("user_id") != uid:
         raise HTTPException(status_code=404, detail="report_not_found")
+    if report.get("session_id"):
+        session = db.get_session(str(report["session_id"]))
+        if session is not None and session.get("user_id") == uid:
+            report["turns"] = db.list_turns(str(report["session_id"]))
+            report["session"] = session
     return {"report": report}
 
 
@@ -581,27 +675,27 @@ def workspace_overview(request: Request, response: Response) -> dict[str, Any]:
     history = db.list_training_history(uid, limit=100)
     reports = db.list_reports(uid, limit=100)
     latest_job = jobs[0] if jobs else None
+    has_target_job = bool(
+        latest_job
+        and any(
+            str(latest_job.get(key) or "").strip()
+            for key in ("jd_text", "job_text", "role", "title")
+        )
+    )
 
-    raw_profile_skills = {
-        str(value).strip().lower() for value in profile.get("skills", []) if str(value).strip()
-    }
-    profile_skills = raw_profile_skills | set(extract_skills(" ".join(raw_profile_skills)))
-    required_values = (latest_job or {}).get("skills") or extract_skills(
-        str((latest_job or {}).get("jd_text") or "")
+    match_context = build_match_context(
+        role=str((latest_job or {}).get("role") or (latest_job or {}).get("title") or ""),
+        job_text=str((latest_job or {}).get("jd_text") or (latest_job or {}).get("job_text") or ""),
+        job_skills=[str(value) for value in (latest_job or {}).get("skills") or []],
+        profile=profile,
     )
-    raw_required_skills = {
-        str(value).strip().lower() for value in required_values if str(value).strip()
-    }
-    required_skills = raw_required_skills | set(
-        extract_skills(" ".join([*raw_required_skills, str((latest_job or {}).get("jd_text") or "")]))
-    )
-    matched_skills = sorted(profile_skills & required_skills)
-    skill_gaps = sorted(required_skills - profile_skills)
-    skill_coverage = (
-        len(matched_skills) / len(required_skills)
-        if required_skills
-        else min(1.0, len(profile_skills) / 5)
-    )
+    profile_skills = set(match_context["candidate_skills"])
+    required_skills = set(match_context["required_skills"])
+    matched_skills = match_context["profile_matched_skills"] if has_target_job else []
+    skill_gaps = match_context["skill_gaps"] if has_target_job else []
+    # A readiness score is a comparison against a concrete target role. A
+    # profile or training history alone must not look like a 50-point match.
+    skill_coverage = match_context["skill_coverage"] / 100 if has_target_job else 0.0
 
     completeness_fields = (
         profile.get("full_name"), profile.get("headline"), profile.get("summary"),
@@ -614,8 +708,14 @@ def workspace_overview(request: Request, response: Response) -> dict[str, Any]:
         if isinstance(item.get("average_score"), (int, float))
     ]
     training_score = min(1.0, (sum(score_values) / len(score_values)) / 5) if score_values else min(1.0, len(history) / 5)
-    readiness = round(100 * (0.45 * skill_coverage + 0.30 * profile_completeness + 0.25 * training_score))
-    if readiness >= 80:
+    readiness = (
+        round(100 * (0.45 * skill_coverage + 0.30 * profile_completeness + 0.25 * training_score))
+        if has_target_job
+        else 0
+    )
+    if not has_target_job:
+        readiness_label = "先设置目标岗位，再开始针对性训练"
+    elif readiness >= 80:
         readiness_label = "准备充分，继续强化高频场景"
     elif readiness >= 55:
         readiness_label = "基础已具备，优先补齐能力缺口"
@@ -690,6 +790,7 @@ def list_knowledge_items(
             limit=max(1, min(limit, 500)),
             include_inactive=include_inactive,
         )
+    items = rag._dedupe(items)
     normalized_query = (query or q or "").strip().lower()
     if normalized_query:
         items = [
@@ -772,18 +873,21 @@ async def start_session(request: SessionCreate, http_request: Request, response:
     try:
         payload = request.model_dump()
         payload["user_id"] = _resolve_user(http_request, response)
-        stored_profile = db.get_user_profile(payload["user_id"]) or {}
-        submitted_profile = payload.get("user_profile") or {}
-        if not any(submitted_profile.get(key) for key in ("skills", "projects", "education", "experience")):
-            payload["user_profile"] = stored_profile
+        stored_profile = db.get_user_profile(payload["user_id"])
+        if stored_profile is not None:
+            # A practice request may carry an old localStorage profile. Once a
+            # profile record exists, training must never overwrite it with the
+            # browser's partial fallback payload, even if it was cleared.
+            # PostgreSQL returns timestamps as datetime objects; validate into
+            # the public profile contract so storage metadata never reaches a
+            # JSON model prompt or the persisted session snapshot.
+            payload["user_profile"] = UserProfile.model_validate(stored_profile).model_dump()
         if payload.get("job_id"):
             job = db.get_job(str(payload["job_id"]))
             if job is None or job.get("user_id") != payload["user_id"]:
                 raise HTTPException(status_code=404, detail="job_not_found")
-            if not payload.get("job_text"):
-                payload["job_text"] = str(job.get("jd_text") or job.get("job_text") or "")
-            if not payload.get("role") or payload.get("role") == "通用软件开发工程师":
-                payload["role"] = str(job.get("role") or job.get("title") or payload["role"])
+            payload["job_text"] = str(job.get("jd_text") or job.get("job_text") or "")
+            payload["role"] = str(job.get("role") or job.get("title") or payload["role"])
         return await interviews.start(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -818,6 +922,35 @@ async def answer_turn(
     session_id: str, payload: AnswerRequest, request: Request, response: Response
 ) -> dict[str, Any]:
     return await _answer(session_id, payload, request, response)
+
+
+@app.post("/api/v1/sessions/{session_id}/advance")
+async def advance_session_topic(
+    session_id: str, request: Request, response: Response
+) -> dict[str, Any]:
+    _require_session_owner(session_id, request, response)
+    try:
+        return await interviews.advance_topic(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="session_not_found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/sessions/{session_id}/group/advance")
+async def advance_group_discussion(
+    session_id: str,
+    payload: GroupDiscussionAdvance,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _require_session_owner(session_id, request, response)
+    try:
+        return await interviews.advance_group_discussion(session_id, payload.interval_seconds)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="session_not_found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 async def _answer(

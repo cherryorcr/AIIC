@@ -1,15 +1,23 @@
-export type ModeId =
-  "technical" | "algorithm" | "behavioral" | "stress" | "case" | "research" | "hr";
+export type ModeId = "technical" | "algorithm" | "behavioral" | "stress" | "case" | "research" | "hr" | "group";
 
 export type BackendQuestion = {
   question_id: string;
   id?: string;
+  title?: string;
   question: string;
   process_type?: string;
   role?: string;
   follow_ups?: string[];
   rubric?: string[];
   skills?: string[];
+  personalized?: boolean;
+  source_question_id?: string;
+  personalization_basis?: string[];
+  generation_provider?: string;
+  root_question_id?: string;
+  root_question?: string;
+  follow_up_depth?: number;
+  is_follow_up?: boolean;
   difficulty?: string;
   source_refs?: string[];
   source_confidence?: string;
@@ -71,8 +79,19 @@ export type WorkspaceOverview = {
 export type MatchResponse = {
   session_id?: string;
   matched_skills: string[];
+  required_skills?: string[];
+  profile_matched_skills?: string[];
   questions: BackendQuestion[];
   match_score?: number;
+  score_breakdown?: Record<string, number>;
+  score_explanation?: string;
+  score_strengths?: string[];
+  score_gaps?: string[];
+  score_source?: "strong_model" | "deterministic" | string;
+  score_cached?: boolean;
+  score_snapshot_id?: string;
+  score_updated_at?: string;
+  scoring_version?: string;
   [key: string]: unknown;
 };
 
@@ -84,6 +103,7 @@ export type SessionSummary = {
   created_at?: string;
   updated_at?: string;
   turns?: Array<Record<string, unknown>>;
+  group_messages?: GroupDiscussionMessage[];
   matched_skills?: string[];
   session?: {
     session_id?: string;
@@ -100,6 +120,18 @@ export type SessionSummary = {
     [key: string]: unknown;
   };
   [key: string]: unknown;
+};
+
+export type GroupDiscussionMessage = {
+  message_id: string;
+  session_id: string;
+  speaker: string;
+  role?: string;
+  message: string;
+  group_phase?: string;
+  next_delay_seconds: number;
+  provider?: string;
+  created_at?: string;
 };
 
 export type JobRecord = {
@@ -178,6 +210,21 @@ export type Feedback = {
   next_question?: string | null;
   next_action: string;
   source_refs: string[];
+  group_phase?: string | null;
+  group_reaction?: {
+    speaker?: string;
+    role?: string;
+    message?: string;
+    prompt?: string;
+    [key: string]: unknown;
+  } | null;
+  group_reactions?: Array<{
+    speaker?: string;
+    role?: string;
+    message?: string;
+    prompt?: string;
+    [key: string]: unknown;
+  }>;
 };
 
 export type TurnResponse = {
@@ -202,11 +249,18 @@ export type AlgorithmResult = {
 
 export type ApiError = Error & { status?: number };
 
-async function request<T>(
-  path: string,
-  init?: RequestInit,
-  options: RequestOptions = {},
-): Promise<T> {
+const WORKSPACE_UPDATED_EVENT = "techmatch:workspace-updated";
+
+function notifyWorkspaceUpdated() {
+  globalThis.dispatchEvent?.(new Event(WORKSPACE_UPDATED_EVENT));
+}
+
+export function subscribeWorkspaceUpdates(listener: () => void) {
+  globalThis.addEventListener?.(WORKSPACE_UPDATED_EVENT, listener);
+  return () => globalThis.removeEventListener?.(WORKSPACE_UPDATED_EVENT, listener);
+}
+
+async function request<T>(path: string, init?: RequestInit, options: RequestOptions = {}): Promise<T> {
   const timeoutMs = options.timeoutMs ?? 12000;
   const retries = options.retries ?? 2;
   let lastError: ApiError | null = null;
@@ -219,9 +273,7 @@ async function request<T>(
         ...init,
         credentials: "include",
         signal: controller.signal,
-        headers: isMultipart
-          ? { ...(init?.headers ?? {}) }
-          : { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+        headers: isMultipart ? { ...(init?.headers ?? {}) } : { "Content-Type": "application/json", ...(init?.headers ?? {}) },
       });
       const raw = await response.text();
       let payload: unknown = null;
@@ -231,18 +283,12 @@ async function request<T>(
         payload = raw;
       }
       if (!response.ok) {
-        const detail =
-          typeof payload === "object" && payload && "detail" in payload
-            ? String((payload as { detail: unknown }).detail)
-            : `请求失败（${response.status}）`;
+        const detail = typeof payload === "object" && payload && "detail" in payload ? String((payload as { detail: unknown }).detail) : `请求失败（${response.status}）`;
         const error = new Error(detail) as ApiError;
         error.status = response.status;
         // Retry transient HTTP failures only. 404/422 are useful contract signals
         // and should immediately fall back in the caller.
-        if (
-          attempt < retries &&
-          (response.status === 408 || response.status === 429 || response.status >= 500)
-        ) {
+        if (attempt < retries && (response.status === 408 || response.status === 429 || response.status >= 500)) {
           lastError = error;
           await new Promise((resolve) => globalThis.setTimeout(resolve, 250 * (attempt + 1)));
           continue;
@@ -261,11 +307,7 @@ async function request<T>(
       lastError = error;
       // Non-transient HTTP failures have already been parsed above; do not
       // turn a 404/422 contract response into a multi-second retry delay.
-      if (
-        error.status !== undefined &&
-        !(error.status === 408 || error.status === 429 || error.status >= 500)
-      )
-        throw error;
+      if (error.status !== undefined && !(error.status === 408 || error.status === 429 || error.status >= 500)) throw error;
       if (attempt >= retries) throw error;
       await new Promise((resolve) => globalThis.setTimeout(resolve, 250 * (attempt + 1)));
     } finally {
@@ -275,14 +317,7 @@ async function request<T>(
   throw lastError || new Error("网络请求失败");
 }
 
-export function startSession(input: {
-  mode: ModeId;
-  role: string;
-  job_text: string;
-  user_profile: { skills: string[]; projects: string[] };
-  difficulty?: "easy" | "medium" | "hard";
-  job_id?: string;
-}) {
+export function startSession(input: { mode: ModeId; role: string; job_text: string; user_profile: UserProfile; difficulty?: "easy" | "medium" | "hard"; job_id?: string }) {
   return request<StartSessionResponse>(
     "/api/v1/sessions",
     { method: "POST", body: JSON.stringify(input) },
@@ -297,19 +332,8 @@ export function startSession(input: {
 }
 
 /** Preview a job match without creating a persisted interview session. */
-export function previewMatch(input: {
-  mode: ModeId;
-  role: string;
-  job_text: string;
-  user_profile: { skills: string[]; projects: string[] };
-  difficulty?: "easy" | "medium" | "hard";
-  job_id?: string;
-}) {
-  return request<MatchResponse>(
-    "/api/v1/matches",
-    { method: "POST", body: JSON.stringify(input) },
-    { timeoutMs: 20000, retries: 1 },
-  );
+export function previewMatch(input: { mode: ModeId; role: string; job_text: string; user_profile: UserProfile; difficulty?: "easy" | "medium" | "hard"; job_id?: string }) {
+  return request<MatchResponse>("/api/v1/matches", { method: "POST", body: JSON.stringify(input) }, { timeoutMs: 120000, retries: 0 });
 }
 
 export function submitTurn(
@@ -319,6 +343,8 @@ export function submitTurn(
     answer_text?: string;
     code?: string;
     language?: string;
+    revision_of?: string;
+    answer_mode?: "answer" | "supplement" | "retry";
     tests?: Array<{
       args?: unknown[];
       kwargs?: Record<string, unknown>;
@@ -326,18 +352,41 @@ export function submitTurn(
     }>;
   },
 ) {
-  return request<TurnResponse>(`/api/v1/sessions/${encodeURIComponent(sessionId)}/turns`, {
-    method: "POST",
-    body: JSON.stringify(input),
-  }, {
-    // Evaluation may call the remote strong model and then the GPU-hosted
-    // fallback. Do not abort a valid in-flight answer after the generic
-    // 12-second request budget. Retries are intentionally disabled here:
-    // replaying a POST after a client timeout can race with the first request
-    // and advance the interview to the next question twice.
-    timeoutMs: 120000,
-    retries: 0,
+  return request<TurnResponse>(
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/turns`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+    {
+      // Evaluation may call the remote strong model and then the GPU-hosted
+      // fallback. Do not abort a valid in-flight answer after the generic
+      // 12-second request budget. Retries are intentionally disabled here:
+      // replaying a POST after a client timeout can race with the first request
+      // and advance the interview to the next question twice.
+      timeoutMs: 120000,
+      retries: 0,
+    },
+  ).then((result) => {
+    notifyWorkspaceUpdated();
+    return result;
   });
+}
+
+export function advanceSessionTopic(sessionId: string) {
+  return request<{ session_id: string; question: BackendQuestion; status: string }>(
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/advance`,
+    { method: "POST", body: JSON.stringify({}) },
+    { timeoutMs: 120000, retries: 0 },
+  );
+}
+
+export function advanceGroupDiscussion(sessionId: string, intervalSeconds: number) {
+  return request<GroupDiscussionMessage>(
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/group/advance`,
+    { method: "POST", body: JSON.stringify({ interval_seconds: intervalSeconds }) },
+    { timeoutMs: 120000, retries: 0 },
+  );
 }
 
 export function runAlgorithm(
@@ -353,10 +402,7 @@ export function runAlgorithm(
     }>;
   },
 ) {
-  return request<AlgorithmResult & { session_id: string; question_id: string }>(
-    `/api/v1/sessions/${encodeURIComponent(sessionId)}/algorithm/run`,
-    { method: "POST", body: JSON.stringify(input) },
-  );
+  return request<AlgorithmResult & { session_id: string; question_id: string }>(`/api/v1/sessions/${encodeURIComponent(sessionId)}/algorithm/run`, { method: "POST", body: JSON.stringify(input) });
 }
 
 export function healthCheck() {
@@ -368,61 +414,46 @@ export function healthCheck() {
 }
 
 export async function getCurrentUser(): Promise<AuthState> {
-  const result = await request<AuthState>("/api/v1/auth/me", undefined, { retries: 1 });
+  const result = await request<AuthState>("/api/v1/auth/me", undefined, {
+    retries: 1,
+  });
   setActiveUser(result.user.id);
   if (result.profile) writeStorage(PROFILE_KEY, result.profile);
   return { ...result, authenticated: !result.user.is_temporary };
 }
 
-export async function registerAccount(input: {
-  display_name: string;
-  email: string;
-  password: string;
-}): Promise<AuthState> {
-  const result = await request<AuthState>(
-    "/api/v1/auth/register",
-    { method: "POST", body: JSON.stringify(input) },
-    { retries: 0 },
-  );
+export async function registerAccount(input: { display_name: string; email: string; password: string }): Promise<AuthState> {
+  const result = await request<AuthState>("/api/v1/auth/register", { method: "POST", body: JSON.stringify(input) }, { retries: 0 });
   setActiveUser(result.user.id);
   if (result.profile) writeStorage(PROFILE_KEY, result.profile);
   return { ...result, authenticated: true };
 }
 
-export async function loginAccount(input: {
-  email: string;
-  password: string;
-}): Promise<AuthState> {
-  const result = await request<AuthState>(
-    "/api/v1/auth/login",
-    { method: "POST", body: JSON.stringify(input) },
-    { retries: 0 },
-  );
+export async function loginAccount(input: { email: string; password: string }): Promise<AuthState> {
+  const result = await request<AuthState>("/api/v1/auth/login", { method: "POST", body: JSON.stringify(input) }, { retries: 0 });
   setActiveUser(result.user.id);
   if (result.profile) writeStorage(PROFILE_KEY, result.profile);
   return { ...result, authenticated: true };
 }
 
 export async function logoutAccount() {
-  return request<{ status: string }>(
-    "/api/v1/auth/logout",
-    { method: "POST", body: JSON.stringify({}) },
-    { retries: 0 },
-  );
+  return request<{ status: string }>("/api/v1/auth/logout", { method: "POST", body: JSON.stringify({}) }, { retries: 0 });
 }
 
 export async function createTemporaryUser(displayName = "临时用户"): Promise<AuthState> {
-  const result = await request<{ user: UserAccount; profile?: UserProfile | null; status?: string }>(
-    "/api/v1/users/temporary",
-    { method: "POST", body: JSON.stringify({ display_name: displayName }) },
-    { retries: 0 },
-  );
+  const result = await request<{
+    user: UserAccount;
+    profile?: UserProfile | null;
+    status?: string;
+  }>("/api/v1/users/temporary", { method: "POST", body: JSON.stringify({ display_name: displayName }) }, { retries: 0 });
   setActiveUser(result.user.id);
   return { ...result, authenticated: false };
 }
 
 export function getWorkspaceOverview() {
-  return request<WorkspaceOverview>("/api/v1/workspace/overview", undefined, { retries: 1 });
+  return request<WorkspaceOverview>("/api/v1/workspace/overview", undefined, {
+    retries: 1,
+  });
 }
 
 /** Call the persisted GraphRAG matcher for an existing session. */
@@ -438,16 +469,12 @@ export function matchSession(sessionId: string, filters: Record<string, unknown>
 }
 
 /** Public question-bank search; management endpoints remain admin-only. */
-export async function listKnowledgeItems(
-  options: { processType?: string; query?: string; limit?: number } = {},
-) {
+export async function listKnowledgeItems(options: { processType?: string; query?: string; limit?: number } = {}) {
   const params = new URLSearchParams();
   if (options.processType) params.set("process_type", options.processType);
   if (options.query?.trim()) params.set("q", options.query.trim());
   params.set("limit", String(options.limit ?? 200));
-  const result = await request<{ items: BackendQuestion[] }>(
-    `/api/v1/questions?${params.toString()}`,
-  );
+  const result = await request<{ items: BackendQuestion[] }>(`/api/v1/questions?${params.toString()}`);
   return result.items || [];
 }
 
@@ -456,16 +483,22 @@ export function getSessionSummary(sessionId: string) {
 }
 
 export function completeSession(sessionId: string) {
-  return request<{ status: string; session?: SessionSummary }>(
-    `/api/v1/sessions/${encodeURIComponent(sessionId)}/complete`,
-    { method: "POST", body: JSON.stringify({}) },
-  );
+  return request<{
+    status: string;
+    turn_count?: number;
+    report?: ReportRecord | null;
+    session?: SessionSummary;
+  }>(`/api/v1/sessions/${encodeURIComponent(sessionId)}/complete`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  }).then((result) => {
+    notifyWorkspaceUpdated();
+    return result;
+  });
 }
 
 export async function listJobs(limit = 100): Promise<JobRecord[]> {
-  const result = await request<{ jobs?: JobRecord[] }>(
-    `/api/v1/jobs?limit=${Math.max(1, Math.min(limit, 500))}`,
-  );
+  const result = await request<{ jobs?: JobRecord[] }>(`/api/v1/jobs?limit=${Math.max(1, Math.min(limit, 500))}`);
   return result.jobs || [];
 }
 
@@ -474,52 +507,38 @@ export async function uploadDocument(file: File, kind: DocumentKind) {
   const body = new FormData();
   body.append("file", file);
   body.append("kind", kind);
-  const result = await request<DocumentParseResponse>(
-    "/api/v1/documents/parse",
-    { method: "POST", body },
-    { timeoutMs: 120000, retries: 0 },
-  );
+  const result = await request<DocumentParseResponse>("/api/v1/documents/parse", { method: "POST", body }, { timeoutMs: 120000, retries: 0 });
   return result.document || result;
 }
 
 export async function listDocuments(): Promise<CandidateDocument[]> {
-  const result = await request<{ documents?: CandidateDocument[]; items?: CandidateDocument[] }>(
-    "/api/v1/documents",
-  );
+  const result = await request<{
+    documents?: CandidateDocument[];
+    items?: CandidateDocument[];
+  }>("/api/v1/documents");
   return result.documents || result.items || [];
 }
 
 export async function getDocument(documentId: string) {
-  const result = await request<{ document?: CandidateDocument } | CandidateDocument>(
-    `/api/v1/documents/${encodeURIComponent(documentId)}`,
-  );
+  const result = await request<{ document?: CandidateDocument } | CandidateDocument>(`/api/v1/documents/${encodeURIComponent(documentId)}`);
   return "document" in result && result.document ? result.document : result;
 }
 
 /** Persist the user-reviewed extraction into the canonical profile or job record. */
 export async function confirmDocument(documentId: string, payload: Record<string, unknown>) {
-  const result = await request<DocumentParseResponse>(
-    `/api/v1/documents/${encodeURIComponent(documentId)}/confirm`,
-    { method: "POST", body: JSON.stringify(payload) },
-    { timeoutMs: 30000, retries: 0 },
-  );
+  const result = await request<DocumentParseResponse>(`/api/v1/documents/${encodeURIComponent(documentId)}/confirm`, { method: "POST", body: JSON.stringify(payload) }, { timeoutMs: 30000, retries: 0 });
+  notifyWorkspaceUpdated();
   return result.document || result;
 }
 
 export async function deleteDocument(documentId: string) {
-  return request<{ status?: string }>(
-    `/api/v1/documents/${encodeURIComponent(documentId)}`,
-    { method: "DELETE" },
-    { retries: 0 },
-  );
+  const result = await request<{ status?: string }>(`/api/v1/documents/${encodeURIComponent(documentId)}`, { method: "DELETE" }, { retries: 0 });
+  notifyWorkspaceUpdated();
+  return result;
 }
 
-export async function listFavorites(
-  limit = 500,
-): Promise<{ ids: string[]; items: BackendQuestion[] }> {
-  const result = await request<{ items?: BackendQuestion[] }>(
-    `/api/v1/favorites?limit=${Math.max(1, Math.min(limit, 500))}`,
-  );
+export async function listFavorites(limit = 500): Promise<{ ids: string[]; items: BackendQuestion[] }> {
+  const result = await request<{ items?: BackendQuestion[] }>(`/api/v1/favorites?limit=${Math.max(1, Math.min(limit, 500))}`);
   const items = result.items || [];
   return {
     items,
@@ -528,9 +547,7 @@ export async function listFavorites(
 }
 
 export async function listReports(limit = 100): Promise<ReportRecord[]> {
-  const result = await request<{ reports?: ReportRecord[] }>(
-    `/api/v1/reports?limit=${Math.max(1, Math.min(limit, 500))}`,
-  );
+  const result = await request<{ reports?: ReportRecord[] }>(`/api/v1/reports?limit=${Math.max(1, Math.min(limit, 500))}`);
   return result.reports || [];
 }
 
@@ -588,11 +605,7 @@ export function listRememberedSessionIds() {
 
 export async function listSessionHistory() {
   try {
-    const result = await request<{ items?: SessionSummary[] }>(
-      "/api/v1/history?limit=100",
-      undefined,
-      { retries: 1 },
-    );
+    const result = await request<{ items?: SessionSummary[] }>("/api/v1/history?limit=100", undefined, { retries: 1 });
     if (Array.isArray(result.items)) return result.items;
   } catch {
     // Older servers do not expose the persisted history endpoint. Fall back
@@ -600,9 +613,7 @@ export async function listSessionHistory() {
   }
   const ids = listRememberedSessionIds();
   const results = await Promise.allSettled(ids.map((id) => getSessionSummary(id)));
-  return results
-    .filter((item): item is PromiseFulfilledResult<SessionSummary> => item.status === "fulfilled")
-    .map((item) => item.value);
+  return results.filter((item): item is PromiseFulfilledResult<SessionSummary> => item.status === "fulfilled").map((item) => item.value);
 }
 
 export function loadUserProfile(): UserProfile {
@@ -651,7 +662,6 @@ export async function saveUserProfile(profile: UserProfile) {
             title: "当前目标岗位",
             role: "当前目标岗位",
             jd_text: profile.job_text,
-            skills: profile.skills,
           }),
         },
         { retries: 0 },
@@ -660,6 +670,7 @@ export async function saveUserProfile(profile: UserProfile) {
   } catch {
     /* local fallback is intentional */
   }
+  notifyWorkspaceUpdated();
   return profile;
 }
 
@@ -668,9 +679,7 @@ export function loadFavorites() {
 }
 export async function toggleFavorite(questionId: string) {
   const current = loadFavorites();
-  const next = current.includes(questionId)
-    ? current.filter((id) => id !== questionId)
-    : [questionId, ...current];
+  const next = current.includes(questionId) ? current.filter((id) => id !== questionId) : [questionId, ...current];
   writeStorage(FAVORITES_KEY, next);
   try {
     const result = await request<{ favorite?: boolean }>(
@@ -682,9 +691,7 @@ export async function toggleFavorite(questionId: string) {
       { retries: 0 },
     );
     if (typeof result.favorite === "boolean" && result.favorite !== next.includes(questionId)) {
-      const corrected = result.favorite
-        ? [questionId, ...current.filter((id) => id !== questionId)]
-        : current.filter((id) => id !== questionId);
+      const corrected = result.favorite ? [questionId, ...current.filter((id) => id !== questionId)] : current.filter((id) => id !== questionId);
       writeStorage(FAVORITES_KEY, corrected);
       return corrected;
     }
