@@ -87,14 +87,14 @@ def match_score_schema() -> dict[str, Any]:
     }
     personalized_question = {
         "type": "object",
-        "required": ["source_question_id", "question", "follow_ups", "personalization_basis"],
+        "required": ["source_question_id", "question"],
         "properties": {
             "source_question_id": {"type": "string"},
             "question": {"type": "string"},
-            "follow_ups": {"type": "array", "items": {"type": "string"}},
-            "personalization_basis": {"type": "array", "items": {"type": "string"}},
+            "follow_ups": {"type": ["array", "string", "null"], "items": {"type": "string"}},
+            "personalization_basis": {"type": ["array", "string", "null"], "items": {"type": "string"}},
         },
-        "additionalProperties": False,
+        "additionalProperties": True,
     }
     return {
         "type": "object",
@@ -197,9 +197,13 @@ def personalized_questions_from_model(
         item = dict(base)
         item["question"] = question[:1200]
         follow_ups = raw.get("follow_ups")
+        if isinstance(follow_ups, str):
+            follow_ups = re.split(r"[\r\n]+|[。！？!?]", follow_ups)
         if isinstance(follow_ups, list) and follow_ups:
             item["follow_ups"] = [str(value).strip()[:500] for value in follow_ups if str(value).strip()][:4]
         basis = raw.get("personalization_basis")
+        if isinstance(basis, str):
+            basis = re.split(r"[\r\n]+|[,，、;；]", basis)
         if isinstance(basis, list):
             item["personalization_basis"] = [str(value).strip()[:240] for value in basis if str(value).strip()][:4]
         else:
