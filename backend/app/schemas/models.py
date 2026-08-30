@@ -10,10 +10,14 @@ Difficulty = Literal["easy", "medium", "hard"]
 
 
 class UserProfile(BaseModel):
+    full_name: str | None = None
+    headline: str | None = None
+    summary: str | None = None
     projects: list[str] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
     education: str | None = None
     experience: str | None = None
+    achievements: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
 
 
@@ -45,19 +49,27 @@ class TemporaryUser(BaseModel):
 
 
 class UserProfileUpdate(BaseModel):
+    full_name: str | None = None
+    headline: str | None = None
+    summary: str | None = None
     skills: list[str] = Field(default_factory=list)
     projects: list[str] = Field(default_factory=list)
     education: str | None = None
     experience: str | None = None
+    achievements: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
 
 
 class UserProfileRecord(BaseModel):
     user_id: str
+    full_name: str | None = None
+    headline: str | None = None
+    summary: str | None = None
     skills: list[str] = Field(default_factory=list)
     projects: list[str] = Field(default_factory=list)
     education: str | None = None
     experience: str | None = None
+    achievements: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
     profile_json: dict[str, Any] = Field(default_factory=dict)
     updated_at: str | None = None
@@ -87,6 +99,35 @@ class JobRecord(BaseModel):
     payload_json: dict[str, Any] = Field(default_factory=dict)
     created_at: str | None = None
     updated_at: str | None = None
+
+
+DocumentKind = Literal["resume", "job_description"]
+DocumentStatus = Literal["uploaded", "parsed", "confirmed", "failed"]
+
+
+class CandidateDocumentRecord(BaseModel):
+    id: str
+    user_id: str
+    kind: DocumentKind
+    filename: str
+    content_type: str = "application/octet-stream"
+    extracted_text: str = ""
+    parsed_json: dict[str, Any] = Field(default_factory=dict)
+    status: DocumentStatus = "uploaded"
+    provider: str | None = None
+    error: str | None = None
+    linked_id: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class DocumentConfirmRequest(BaseModel):
+    """Human-reviewed extraction payload submitted before writing a profile/JD."""
+
+    parsed: dict[str, Any] = Field(default_factory=dict)
+    # ``data`` is accepted as an alias for clients that name the editable
+    # payload generically.  The API normalizes both forms before persistence.
+    data: dict[str, Any] | None = None
 
 
 class FavoriteRequest(BaseModel):

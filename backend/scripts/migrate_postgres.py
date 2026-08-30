@@ -66,7 +66,9 @@ def _copy_sqlite(cur, sqlite_path: Path) -> int:
         "schema_migrations", "users", "user_profiles", "jobs", "sessions",
         "sources", "skills", "questions", "question_skills", "graph_edges",
         "question_favorites", "turns", "feedback", "model_invocations", "reports",
+        "candidate_documents",
     ]
+    boolean_columns = {"is_temporary", "is_active", "redistribution_allowed", "pii_redacted"}
     copied = 0
     with sqlite3.connect(sqlite_path) as source:
         source.row_factory = sqlite3.Row
@@ -78,6 +80,10 @@ def _copy_sqlite(cur, sqlite_path: Path) -> int:
             for row in rows:
                 values = []
                 for column, value in zip(columns, row):
+                    if column in boolean_columns and value is not None:
+                        # SQLite stores booleans as 0/1 integers; psycopg must
+                        # receive a Python bool for PostgreSQL boolean columns.
+                        value = bool(value)
                     if column.endswith("_json") and isinstance(value, str):
                         try:
                             value = Json(__import__("json").loads(value))

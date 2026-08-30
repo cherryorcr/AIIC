@@ -32,7 +32,12 @@ def reset_database():
 
     db.init()
     with db._lock, db._conn:  # noqa: SLF001 - explicit test-only isolation
-        for table in ("feedback", "turns", "sessions", "graph_edges", "question_skills", "questions", "skills", "sources"):
+        for table in (
+            "feedback", "turns", "reports", "question_favorites", "sessions",
+            "model_invocations", "user_profiles", "jobs", "users", "graph_edges",
+            "question_skills", "questions", "skills", "sources",
+            "candidate_documents",
+        ):
             db._conn.execute(f"DELETE FROM {table}")
     db.seed_questions(rag._load())
     rag.reload()
@@ -60,6 +65,51 @@ def test_start_and_answer():
         assert answered.json()["feedback"]["evidence_quotes"]
 
 
+def test_answer_retry_is_idempotent_after_question_advances():
+    """A replayed POST returns the committed turn instead of a 400 race."""
+    with TestClient(app) as client:
+        started = client.post(
+            "/api/v1/sessions",
+            json={
+                "mode": "behavioral",
+                "role": "后端开发工程师",
+                "user_profile": {"skills": ["Python"], "projects": ["TechMatch"]},
+            },
+        )
+        assert started.status_code == 200
+        payload = started.json()
+        body = {
+            "question_id": payload["question_id"],
+            "answer_text": "我在项目中优化了接口性能，并用压测验证延迟下降 20%。",
+        }
+        first = client.post(f"/api/v1/sessions/{payload['session_id']}/turns", json=body)
+        replay = client.post(f"/api/v1/sessions/{payload['session_id']}/turns", json=body)
+        assert first.status_code == 200
+        assert replay.status_code == 200
+        assert replay.json()["turn_id"] == first.json()["turn_id"]
+        assert replay.json()["feedback"] == first.json()["feedback"]
+
+
+def test_match_preview_does_not_create_training_session():
+    from app.main import db
+
+    with TestClient(app) as client:
+        before = db._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        response = client.post(
+            "/api/v1/matches",
+            json={
+                "mode": "technical",
+                "role": "后端开发工程师",
+                "job_text": "Python FastAPI PostgreSQL",
+                "user_profile": {"skills": ["Python"], "projects": ["TechMatch"]},
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["questions"]
+        after = db._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        assert after == before
+
+
 def test_algorithm_runner_rejects_forbidden_code():
     with TestClient(app) as client:
         started = client.post("/api/v1/sessions", json={"mode": "algorithm", "role": "算法工程师"})
@@ -72,20 +122,42 @@ def test_algorithm_runner_rejects_forbidden_code():
         assert result.json()["status"] == "rejected"
 
 
+def test_algorithm_runner_rejects_reflective_sandbox_escape():
+    with TestClient(app) as client:
+        started = client.post("/api/v1/sessions", json={"mode": "algorithm", "role": "算法工程师"})
+        sid = started.json()["session_id"]
+        result = client.post(
+            f"/api/v1/sessions/{sid}/algorithm/run",
+            json={
+                "question_id": started.json()["question_id"],
+                "code": "def solution(x):\n    return getattr(x, '__class__')",
+            },
+        )
+        assert result.status_code == 200
+        assert result.json()["status"] == "rejected"
+
+
 def test_algorithm_question_and_knowledge_management():
     with TestClient(app) as client:
         started = client.post("/api/v1/sessions", json={"mode": "algorithm", "role": "算法工程师"})
         assert started.status_code == 200
         payload = started.json()
-        assert payload["question_id"] == "Q009"
-        assert len(payload["tests"]) == 4
+        assert payload["question_id"].startswith("PUB-ALG-")
+        assert isinstance(payload["tests"], list)
 
         stats = client.get("/api/v1/admin/knowledge/stats")
         assert stats.status_code == 200
-        assert stats.json()["questions"] >= 9
+        assert stats.json()["questions"] >= 17
         listing = client.get("/api/v1/admin/knowledge/items", params={"process_type": "算法面"})
         assert listing.status_code == 200
-        assert any(item["id"] == "Q009" for item in listing.json()["items"])
+        assert any(item["id"].startswith("PUB-ALG-") for item in listing.json()["items"])
+
+        # The public frontend sends the stable mode ID; the database stores
+        # the Chinese process label. Both forms must resolve to the same data.
+        public_listing = client.get("/api/v1/questions", params={"process_type": "algorithm"})
+        assert public_listing.status_code == 200
+        assert public_listing.json()["items"]
+        assert all(item["id"].startswith("PUB-ALG-") for item in public_listing.json()["items"])
 
         created = client.post(
             "/api/v1/admin/knowledge/items",
@@ -168,9 +240,9 @@ def test_user_profile_job_favorite_history_and_report_persist():
         )
         assert job.status_code == 200
         assert "python" in [x.lower() for x in job.json()["job"]["skills"]]
-        favorite = client.post("/api/v1/questions/Q001/favorite", headers=headers, json={"favorite": True})
+        favorite = client.post("/api/v1/questions/PUB-BEH-AMAZON-001/favorite", headers=headers, json={"favorite": True})
         assert favorite.status_code == 200
-        assert any(item["id"] == "Q001" for item in client.get("/api/v1/favorites", headers=headers).json()["items"])
+        assert any(item["id"] == "PUB-BEH-AMAZON-001" for item in client.get("/api/v1/favorites", headers=headers).json()["items"])
         report = client.post("/api/v1/reports", headers=headers, json={"title": "回归报告", "payload": {"score": 4}})
         assert report.status_code == 200
         assert any(item["title"] == "回归报告" for item in client.get("/api/v1/reports", headers=headers).json()["reports"])
@@ -214,3 +286,68 @@ def test_session_can_be_completed_and_reported():
         assert completed.json()["status"] == "completed"
         summary = client.get(f"/api/v1/sessions/{sid}")
         assert summary.json()["session"]["status"] == "completed"
+
+
+def test_candidate_document_upload_parse_confirm_and_ownership():
+    with TestClient(app) as client:
+        created = client.post("/api/v1/users/temporary", json={"display_name": "资料用户"})
+        assert created.status_code == 200
+        uid = created.json()["user"]["id"]
+        headers = {"X-User-Id": uid}
+        upload = client.post(
+            "/api/v1/documents/parse",
+            headers=headers,
+            files={"file": ("resume.txt", "张三\\nPython FastAPI\\nTechMatch 项目", "text/plain")},
+            data={"kind": "resume"},
+        )
+        assert upload.status_code == 200
+        document = upload.json()["document"]
+        assert document["status"] == "parsed"
+        assert document["extracted_text"].startswith("张三")
+        assert "raw" not in document
+        did = document["id"]
+        listed = client.get("/api/v1/documents", headers=headers)
+        assert listed.status_code == 200 and listed.json()["documents"]
+        confirmed = client.post(
+            f"/api/v1/documents/{did}/confirm",
+            headers=headers,
+            json={"parsed": {"profile": {"full_name": "张三", "skills": ["Python"], "projects": ["TechMatch"]}}},
+        )
+        assert confirmed.status_code == 200
+        assert confirmed.json()["status"] == "confirmed"
+        profile = client.get("/api/v1/profile", headers=headers).json()["profile"]
+        assert profile["full_name"] == "张三"
+        other = client.post("/api/v1/users/temporary", json={"display_name": "其他用户"})
+        other_headers = {"X-User-Id": other.json()["user"]["id"]}
+        assert client.get(f"/api/v1/documents/{did}", headers=other_headers).status_code == 404
+        assert client.delete(f"/api/v1/documents/{did}", headers=headers).status_code == 200
+
+
+def test_candidate_document_rejects_unsupported_and_oversized_uploads():
+    with TestClient(app) as client:
+        headers = {"X-User-Id": "doc-format-user"}
+        bad = client.post(
+            "/api/v1/documents/parse", headers=headers,
+            files={"file": ("resume.exe", b"MZ", "application/octet-stream")}, data={"kind": "resume"},
+        )
+        assert bad.status_code == 415
+        huge = client.post(
+            "/api/v1/documents/parse", headers=headers,
+            files={"file": ("resume.txt", b"x" * (5 * 1024 * 1024 + 1), "text/plain")}, data={"kind": "resume"},
+        )
+        assert huge.status_code == 413
+
+
+def test_postgres_migration_baseline_is_checked_in():
+    """The production DATABASE_URL path must have a runnable schema baseline."""
+    migration = Path(__file__).resolve().parents[1] / "migrations" / "001_postgres_schema.sql"
+    sql = migration.read_text(encoding="utf-8")
+    for table in (
+        "users", "user_profiles", "jobs", "sessions", "sources", "skills",
+        "questions", "question_skills", "graph_edges", "turns", "feedback",
+        "model_invocations", "question_favorites", "reports", "candidate_documents",
+    ):
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in sql
+    assert "ON CONFLICT (version) DO NOTHING" in sql
+    migration_script = (Path(__file__).resolve().parents[1] / "scripts" / "migrate_postgres.py").read_text(encoding="utf-8")
+    assert "boolean_columns" in migration_script

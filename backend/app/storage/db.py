@@ -53,11 +53,17 @@ class _PostgresCompatConnection:
                 self.execute(statement)
 
     def __enter__(self):
-        self.raw.__enter__()
+        # psycopg's connection context manager closes the connection on exit.
+        # This adapter is held for the lifetime of the FastAPI process, so a
+        # repository transaction must commit/rollback without closing it.
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        return self.raw.__exit__(exc_type, exc, tb)
+        if exc_type is None:
+            self.raw.commit()
+        else:
+            self.raw.rollback()
+        return False
 
     def close(self):
         return self.raw.close()
@@ -131,6 +137,11 @@ class Database:
         sql = sql.replace("INSERT OR IGNORE INTO", "INSERT INTO")
         if ignored and "ON CONFLICT" not in sql.upper():
             sql = sql.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+        # SQLite represents booleans as 0/1, while the PostgreSQL schema uses
+        # native BOOLEAN columns.  TRUE/FALSE are also valid SQLite literals,
+        # so this keeps one repository query surface for both dialects.
+        sql = re.sub(r"\bis_active\s*=\s*1\b", "is_active = TRUE", sql, flags=re.I)
+        sql = re.sub(r"\bis_active\s*=\s*0\b", "is_active = FALSE", sql, flags=re.I)
         # PostgreSQL accepts the same DDL and SELECT syntax after qmark
         # parameters are converted to psycopg's positional placeholders.
         return sql.replace("?", "%s")
@@ -350,6 +361,22 @@ class Database:
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL,
                     FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE SET NULL
                 );
+                CREATE TABLE IF NOT EXISTS candidate_documents (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+                    extracted_text TEXT NOT NULL DEFAULT '',
+                    parsed_json TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'uploaded',
+                    provider TEXT,
+                    error TEXT,
+                    linked_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
                 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
                 CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs(user_id, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_reports_user ON reports(user_id, updated_at);
@@ -357,6 +384,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_questions_process ON questions(process_type);
                 CREATE INDEX IF NOT EXISTS idx_edges_from ON graph_edges(from_type, from_id);
                 CREATE INDEX IF NOT EXISTS idx_favorites_user ON question_favorites(user_id);
+                CREATE INDEX IF NOT EXISTS idx_candidate_documents_user ON candidate_documents(user_id, updated_at);
                 """
             )
             # Databases created by an earlier MVP release already contain the
@@ -446,8 +474,8 @@ class Database:
                         source_id, str(source.get("title", "")), source.get("url"), source.get("license"),
                         source_type, source.get("version"), source.get("published_at"),
                         source.get("accessed_at") or source.get("collected_at"),
-                        int(bool(source.get("redistribution_allowed", source_type == "synthetic_mock"))),
-                        int(bool(source.get("pii_redacted", True))), source.get("content_hash"), now, now,
+                        bool(source.get("redistribution_allowed", source_type == "synthetic_mock")),
+                        bool(source.get("pii_redacted", True)), source.get("content_hash"), now, now,
                     ),
                 )
                 self._conn.execute(
@@ -469,7 +497,7 @@ class Database:
                         json.dumps(item.get("rubric", []), ensure_ascii=False), item.get("function_name"),
                         json.dumps(item.get("tests", []), ensure_ascii=False), source_id,
                         str(item.get("source_confidence") or ("synthetic_mock" if source_type == "synthetic_mock" else "observed")),
-                        1, now, now,
+                        True, now, now,
                     ),
                 )
                 self._conn.execute("DELETE FROM question_skills WHERE question_id = ?", (question_id,))
@@ -692,6 +720,80 @@ class Database:
     # ------------------------------------------------------------------
     # User/profile/job/report persistence
     # ------------------------------------------------------------------
+    def save_candidate_document(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Persist extracted document text and structured result, never bytes."""
+        import uuid
+
+        document_id = str(payload.get("id") or f"doc-{uuid.uuid4().hex}")
+        user_id = str(payload["user_id"])
+        if not self.get_user(user_id):
+            self.create_temp_user(user_id)
+        now = utc_now()
+        parsed = payload.get("parsed_json", payload.get("parsed", {}))
+        if not isinstance(parsed, dict):
+            parsed = {}
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO candidate_documents
+                (id, user_id, kind, filename, content_type, extracted_text, parsed_json,
+                 status, provider, error, linked_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    user_id=excluded.user_id, kind=excluded.kind, filename=excluded.filename,
+                    content_type=excluded.content_type, extracted_text=excluded.extracted_text,
+                    parsed_json=excluded.parsed_json, status=excluded.status, provider=excluded.provider,
+                    error=excluded.error, linked_id=excluded.linked_id, updated_at=excluded.updated_at
+                """,
+                (
+                    document_id, user_id, str(payload.get("kind") or "resume"),
+                    str(payload.get("filename") or "document"),
+                    str(payload.get("content_type") or "application/octet-stream"),
+                    str(payload.get("extracted_text") or ""),
+                    json.dumps(parsed, ensure_ascii=False),
+                    str(payload.get("status") or "uploaded"), payload.get("provider"),
+                    payload.get("error"), payload.get("linked_id"),
+                    payload.get("created_at") or now, now,
+                ),
+            )
+        return self.get_candidate_document(document_id) or {"id": document_id, **payload}
+
+    def get_candidate_document(self, document_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM candidate_documents WHERE id = ?", (document_id,)).fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            item["parsed"] = decode_json(item.pop("parsed_json"), {})
+            return item
+
+    def list_candidate_documents(self, user_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM candidate_documents WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?",
+                (user_id, max(1, min(int(limit), 500))),
+            ).fetchall()
+            result = []
+            for row in rows:
+                item = dict(row)
+                item["parsed"] = decode_json(item.pop("parsed_json"), {})
+                result.append(item)
+            return result
+
+    def delete_candidate_document(self, document_id: str, user_id: str) -> bool:
+        with self._lock, self._conn:
+            result = self._conn.execute(
+                "DELETE FROM candidate_documents WHERE id = ? AND user_id = ?", (document_id, user_id)
+            )
+            return result.rowcount > 0
+
+    # Short aliases keep integrations that refer to generic "documents" APIs
+    # compatible with the explicit candidate-document storage methods.
+    save_document = save_candidate_document
+    get_document = get_candidate_document
+    list_documents = list_candidate_documents
+    delete_document = delete_candidate_document
+
     def create_temp_user(
         self,
         user_id: str | None = None,
@@ -719,7 +821,7 @@ class Database:
                     is_temporary=excluded.is_temporary,
                     last_seen_at=excluded.last_seen_at
                 """,
-                (uid, display_name or "", int(is_temporary), now, now),
+                (uid, display_name or "", bool(is_temporary), now, now),
             )
             row = self._conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
             return dict(row) if row else {"id": uid, "display_name": display_name, "is_temporary": is_temporary}
@@ -1047,6 +1149,30 @@ class Database:
                 item["feedback"] = decode_json(fb[0], {}) if fb else None
                 result.append(item)
             return result
+
+    def get_turn_by_question(self, session_id: str, question_id: str) -> dict[str, Any] | None:
+        """Return the most recent persisted turn for a session/question pair.
+
+        The browser may retry a POST after a timeout even though the first
+        request has already committed.  Looking up the existing turn lets the
+        API return the original result idempotently instead of reporting that
+        the question is no longer current.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM turns WHERE session_id = ? AND question_id = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (session_id, question_id),
+            ).fetchone()
+            if row is None:
+                return None
+            item = dict(row)
+            item["algorithm_result"] = decode_json(item.pop("algorithm_result_json"), None)
+            feedback = self._conn.execute(
+                "SELECT payload_json FROM feedback WHERE turn_id = ?", (item["id"],)
+            ).fetchone()
+            item["feedback"] = decode_json(feedback[0], {}) if feedback else None
+            return item
 
     def save_model_invocation(self, payload: dict[str, Any]) -> None:
         with self._lock, self._conn:
