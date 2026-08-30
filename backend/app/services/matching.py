@@ -137,6 +137,17 @@ def match_score_schema() -> dict[str, Any]:
         },
         "additionalProperties": True,
     }
+    nested_english_scores = {
+        "type": "object",
+        "required": ["skill_coverage", "relevant_experience", "project_evidence", "role_direction_alignment"],
+        "properties": {
+            "skill_coverage": {"type": "number", "minimum": 0, "maximum": 100},
+            "relevant_experience": {"type": "number", "minimum": 0, "maximum": 100},
+            "project_evidence": {"type": "number", "minimum": 0, "maximum": 100},
+            "role_direction_alignment": {"type": "number", "minimum": 0, "maximum": 100},
+        },
+        "additionalProperties": True,
+    }
     return {
         "type": "object",
         # Gateways and strong models sometimes wrap the four scores in a
@@ -145,7 +156,7 @@ def match_score_schema() -> dict[str, Any]:
         "required": ["strengths", "gaps", "explanation"],
         "properties": {
             **dimensions,
-            "scores": chinese_scores,
+            "scores": {"anyOf": [nested_english_scores, chinese_scores]},
             "candidate_name": {"type": "string"},
             "role": {"type": "string"},
             "strengths": {"type": "array", "items": {"type": "string"}},
@@ -299,14 +310,14 @@ def model_match_snapshot(
 ) -> dict[str, Any]:
     score_object = parsed.get("scores") if isinstance(parsed.get("scores"), dict) else {}
 
-    def score_for(english: str, chinese: str) -> Any:
-        return parsed.get(english, score_object.get(chinese))
+    def score_for(english: str, nested_english: str, chinese: str) -> Any:
+        return parsed.get(english, score_object.get(english, score_object.get(nested_english, score_object.get(chinese))))
 
     breakdown = {
-        "skill_coverage": _score(score_for("skill_coverage", "技能覆盖"), context["skill_coverage"]),
-        "experience_relevance": _score(score_for("experience_relevance", "相关经历")),
-        "project_evidence": _score(score_for("project_evidence", "项目证据")),
-        "role_alignment": _score(score_for("role_alignment", "岗位方向一致性")),
+        "skill_coverage": _score(score_for("skill_coverage", "skill_coverage", "技能覆盖"), context["skill_coverage"]),
+        "experience_relevance": _score(score_for("experience_relevance", "relevant_experience", "相关经历")),
+        "project_evidence": _score(score_for("project_evidence", "project_evidence", "项目证据")),
+        "role_alignment": _score(score_for("role_alignment", "role_direction_alignment", "岗位方向一致性")),
     }
     total = round(
         0.55 * breakdown["skill_coverage"]

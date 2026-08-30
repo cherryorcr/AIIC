@@ -491,6 +491,41 @@ def test_match_score_accepts_strong_model_chinese_score_wrapper():
         )
 
 
+def test_match_score_accepts_observed_strong_model_english_wrapper():
+    from app.services.matching import build_match_context, match_score_schema, model_match_snapshot
+    from app.services.model_router import ModelRouter
+
+    payload = {
+        "scores": {
+            "skill_coverage": 40,
+            "relevant_experience": 55,
+            "project_evidence": 30,
+            "role_direction_alignment": 70,
+        },
+        "strengths": ["Python API"],
+        "gaps": ["PostgreSQL"],
+        "explanation": "API 经历匹配，但数据库证据不足。",
+        "personalized_questions": [],
+    }
+    ModelRouter.validate_json(payload, match_score_schema())
+    context = build_match_context(
+        role="后端工程师",
+        job_text="Python FastAPI PostgreSQL",
+        job_skills=[],
+        profile={"skills": ["Python", "FastAPI"], "projects": ["TechMatch"]},
+    )
+
+    snapshot = model_match_snapshot(context, payload)
+    assert snapshot["score_breakdown"] == {
+        "skill_coverage": 40,
+        "experience_relevance": 55,
+        "project_evidence": 30,
+        "role_alignment": 70,
+    }
+    assert snapshot["match_score"] == 44
+    assert snapshot["score_source"] == "strong_model"
+
+
 def test_algorithm_runner_rejects_forbidden_code():
     with TestClient(app) as client:
         started = client.post("/api/v1/sessions", json={"mode": "algorithm", "role": "算法工程师"})
