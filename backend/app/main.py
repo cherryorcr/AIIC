@@ -137,10 +137,11 @@ async def preview_match(request: SessionCreate, http_request: Request, response:
         job_text = str(job.get("jd_text") or job.get("job_text") or "")
         role = str(job.get("role") or job.get("title") or role)
         job_skills = [str(value) for value in job.get("skills") or []]
-    stored_profile = db.get_user_profile(user_id) or {}
-    if any(stored_profile.get(key) for key in ("skills", "projects", "education", "experience", "summary")):
+    stored_profile = db.get_user_profile(user_id)
+    if stored_profile is not None:
         # Scores for saved materials always use the server-confirmed resume,
-        # not a possibly stale localStorage copy submitted by the browser.
+        # not a possibly stale localStorage copy submitted by the browser. An
+        # intentionally cleared profile is canonical as well.
         profile_payload = stored_profile
     context = build_match_context(
         role=role,
@@ -870,11 +871,11 @@ async def start_session(request: SessionCreate, http_request: Request, response:
     try:
         payload = request.model_dump()
         payload["user_id"] = _resolve_user(http_request, response)
-        stored_profile = db.get_user_profile(payload["user_id"]) or {}
-        if any(stored_profile.get(key) for key in ("skills", "projects", "education", "experience", "summary")):
+        stored_profile = db.get_user_profile(payload["user_id"])
+        if stored_profile is not None:
             # A practice request may carry an old localStorage profile. Once a
-            # resume is confirmed, it is canonical and training must never
-            # overwrite it with the browser's partial fallback payload.
+            # profile record exists, training must never overwrite it with the
+            # browser's partial fallback payload, even if it was cleared.
             payload["user_profile"] = stored_profile
         if payload.get("job_id"):
             job = db.get_job(str(payload["job_id"]))

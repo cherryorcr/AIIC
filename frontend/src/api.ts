@@ -622,7 +622,6 @@ export async function saveUserProfile(profile: UserProfile) {
             title: "当前目标岗位",
             role: "当前目标岗位",
             jd_text: profile.job_text,
-            skills: profile.skills,
           }),
         },
         { retries: 0 },

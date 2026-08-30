@@ -126,6 +126,17 @@ def match_score_schema() -> dict[str, Any]:
         },
         "additionalProperties": True,
     }
+    chinese_scores = {
+        "type": "object",
+        "required": ["技能覆盖", "相关经历", "项目证据", "岗位方向一致性"],
+        "properties": {
+            "技能覆盖": {"type": "number", "minimum": 0, "maximum": 100},
+            "相关经历": {"type": "number", "minimum": 0, "maximum": 100},
+            "项目证据": {"type": "number", "minimum": 0, "maximum": 100},
+            "岗位方向一致性": {"type": "number", "minimum": 0, "maximum": 100},
+        },
+        "additionalProperties": True,
+    }
     return {
         "type": "object",
         # Gateways and strong models sometimes wrap the four scores in a
@@ -134,7 +145,7 @@ def match_score_schema() -> dict[str, Any]:
         "required": ["strengths", "gaps", "explanation"],
         "properties": {
             **dimensions,
-            "scores": {"type": "object"},
+            "scores": chinese_scores,
             "candidate_name": {"type": "string"},
             "role": {"type": "string"},
             "strengths": {"type": "array", "items": {"type": "string"}},
@@ -146,6 +157,10 @@ def match_score_schema() -> dict[str, Any]:
                 "items": personalized_question,
             },
         },
+        "anyOf": [
+            {"required": list(dimensions)},
+            {"required": ["scores"]},
+        ],
         "additionalProperties": True,
     }
 

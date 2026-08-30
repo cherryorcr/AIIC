@@ -1188,9 +1188,7 @@ class Database:
                 INSERT INTO match_snapshots
                 (id, user_id, target_key, input_hash, scoring_version, score, source, payload_json, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    score=excluded.score, source=excluded.source,
-                    payload_json=excluded.payload_json, updated_at=excluded.updated_at
+                ON CONFLICT DO NOTHING
                 """,
                 (
                     snapshot_id,

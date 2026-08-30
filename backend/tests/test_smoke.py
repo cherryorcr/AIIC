@@ -450,6 +450,12 @@ def test_match_score_accepts_strong_model_chinese_score_wrapper():
         "role_alignment": 76,
     }
 
+    with pytest.raises(ValueError, match="response_schema_invalid"):
+        ModelRouter.validate_json(
+            {"strengths": [], "gaps": [], "explanation": "missing all score dimensions"},
+            match_score_schema(),
+        )
+
 
 def test_algorithm_runner_rejects_forbidden_code():
     with TestClient(app) as client:

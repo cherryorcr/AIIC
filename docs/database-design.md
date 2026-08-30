@@ -24,6 +24,7 @@
 | `auth_sessions` | 服务端登录态 | 用户 ID、令牌哈希、到期/撤销/最近使用时间、客户端审计信息 |
 | `user_profiles` | 用户技能与项目档案 | 技能、项目经历、教育/经验、约束及扩展 JSON |
 | `jobs` | 用户保存的岗位和 JD | 岗位名称、公司、JD 文本、归一化技能、来源信息 |
+| `match_snapshots` | 简历与 JD 的固定评分快照 | 用户、目标岗位、输入指纹、评分版本、分数、模型/规则来源及解释 |
 | `question_favorites` | 用户收藏题目 | 用户 ID、题目 ID、收藏时间 |
 | `reports` | 训练报告快照 | 用户/会话、报告标题、结构化报告 JSON |
 
@@ -60,7 +61,7 @@ POST   /api/v1/admin/knowledge/reload?prune=false
 - PostgreSQL 基线迁移脚本位于 `backend/migrations/001_postgres_schema.sql`，可通过
   `python backend/scripts/migrate_postgres.py --database-url "$DATABASE_URL"` 执行；若要
   迁移既有 SQLite 数据，再加 `--sqlite-path data/app.db`。
-  SQLite 运行时仍由 `Database.init()` 自动执行版本 1–6 的幂等迁移；因此可以先用
+  SQLite 运行时仍由 `Database.init()` 自动执行版本 1–7 的幂等迁移；因此可以先用
   SQLite 开发，再切换到 PostgreSQL，而不改变 API 层的数据契约。
 - 备份至少包含 `app.db` 和题库 JSON；恢复后调用 `POST /api/v1/admin/knowledge/reload` 校验统计数。
 - API key、管理员 token 和 SSH 密码只通过部署环境变量/密钥管理注入，禁止写入数据库或仓库。
