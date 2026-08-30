@@ -360,6 +360,20 @@ class Database:
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
                 );
+                CREATE TABLE IF NOT EXISTS match_snapshots (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    target_key TEXT NOT NULL,
+                    input_hash TEXT NOT NULL,
+                    scoring_version TEXT NOT NULL,
+                    score INTEGER NOT NULL,
+                    source TEXT NOT NULL,
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                    UNIQUE(user_id, target_key, input_hash, scoring_version)
+                );
                 CREATE TABLE IF NOT EXISTS question_favorites (
                     user_id TEXT NOT NULL,
                     question_id TEXT NOT NULL,
@@ -397,6 +411,7 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
                 CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs(user_id, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_match_snapshots_lookup ON match_snapshots(user_id, target_key, input_hash, scoring_version);
                 CREATE INDEX IF NOT EXISTS idx_reports_user ON reports(user_id, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_feedback_turn ON feedback(turn_id);
                 CREATE INDEX IF NOT EXISTS idx_questions_process ON questions(process_type);
@@ -466,6 +481,10 @@ class Database:
             self._conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, description, applied_at) VALUES (?, ?, ?)",
                 (6, "registered accounts and hashed authentication sessions", utc_now()),
+            )
+            self._conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, description, applied_at) VALUES (?, ?, ?)",
+                (7, "persisted resume and job match score snapshots", utc_now()),
             )
 
     def seed_questions(self, items: list[dict[str, Any]], *, prune: bool = False) -> int:
@@ -1121,6 +1140,77 @@ class Database:
                 payload["job_id"] = payload.get("id")
                 result.append(payload)
             return result
+
+    def get_match_snapshot(
+        self,
+        user_id: str,
+        target_key: str,
+        input_hash: str,
+        scoring_version: str,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM match_snapshots
+                WHERE user_id = ? AND target_key = ? AND input_hash = ? AND scoring_version = ?
+                LIMIT 1
+                """,
+                (user_id, target_key, input_hash, scoring_version),
+            ).fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            payload = decode_json(item.pop("payload_json"), {})
+            payload.update(item)
+            return payload
+
+    def save_match_snapshot(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Persist one immutable score for a specific resume/JD input hash."""
+        user_id = str(payload["user_id"])
+        if not self.get_user(user_id):
+            self.create_temp_user(user_id)
+        fingerprint = "|".join(
+            [
+                user_id,
+                str(payload["target_key"]),
+                str(payload["input_hash"]),
+                str(payload["scoring_version"]),
+            ]
+        )
+        snapshot_id = str(payload.get("id") or stable_id("match", fingerprint, 20))
+        now = utc_now()
+        score = min(100, max(0, int(round(float(payload.get("match_score", payload.get("score", 0)))))))
+        stored = dict(payload)
+        stored["match_score"] = score
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO match_snapshots
+                (id, user_id, target_key, input_hash, scoring_version, score, source, payload_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    score=excluded.score, source=excluded.source,
+                    payload_json=excluded.payload_json, updated_at=excluded.updated_at
+                """,
+                (
+                    snapshot_id,
+                    user_id,
+                    payload["target_key"],
+                    payload["input_hash"],
+                    payload["scoring_version"],
+                    score,
+                    str(payload.get("score_source") or payload.get("source") or "deterministic"),
+                    json.dumps(stored, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+        return self.get_match_snapshot(
+            user_id,
+            str(payload["target_key"]),
+            str(payload["input_hash"]),
+            str(payload["scoring_version"]),
+        ) or {"id": snapshot_id, **stored, "created_at": now, "updated_at": now}
 
     def favorite_question(self, user_id: str, question_id: str) -> bool:
         if not self.get_user(user_id):

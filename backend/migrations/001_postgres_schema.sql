@@ -77,6 +77,20 @@ CREATE TABLE IF NOT EXISTS sessions (
     updated_at TIMESTAMPTZ NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS match_snapshots (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    target_key TEXT NOT NULL,
+    input_hash TEXT NOT NULL,
+    scoring_version TEXT NOT NULL,
+    score INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    UNIQUE (user_id, target_key, input_hash, scoring_version)
+);
+
 CREATE TABLE IF NOT EXISTS sources (
     source_id TEXT PRIMARY KEY,
     title TEXT NOT NULL DEFAULT '',
@@ -210,6 +224,7 @@ CREATE TABLE IF NOT EXISTS candidate_documents (
 
 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs(user_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_match_snapshots_lookup ON match_snapshots(user_id, target_key, input_hash, scoring_version);
 CREATE INDEX IF NOT EXISTS idx_reports_user ON reports(user_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_feedback_turn ON feedback(turn_id);
 CREATE INDEX IF NOT EXISTS idx_questions_process ON questions(process_type);
@@ -237,4 +252,7 @@ VALUES (5, 'candidate resume and job-description documents', NOW())
 ON CONFLICT (version) DO NOTHING;
 INSERT INTO schema_migrations(version, description, applied_at)
 VALUES (6, 'registered accounts and hashed authentication sessions', NOW())
+ON CONFLICT (version) DO NOTHING;
+INSERT INTO schema_migrations(version, description, applied_at)
+VALUES (7, 'persisted resume and job match score snapshots', NOW())
 ON CONFLICT (version) DO NOTHING;

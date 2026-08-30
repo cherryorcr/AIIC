@@ -24,16 +24,21 @@ def question_prompt(mode: str, role: str, profile: dict[str, Any], matched: dict
     policy = policy_for(mode)
     context = {
         "role": role,
+        "job_description": matched.get("job_text", ""),
         "profile": profile,
         "matched_skills": matched.get("matched_skills", []),
         "candidate_question": (matched.get("questions") or [{}])[0].get("question", ""),
+        "candidate_question_source_id": (matched.get("questions") or [{}])[0].get("question_id", ""),
+        "candidate_question_rubric": (matched.get("questions") or [{}])[0].get("rubric", []),
         "dimensions": policy["dimensions"],
     }
     instruction = (
         "你是无领导小组讨论的主持人。请从检索到的题目出发，生成一个适合 4-6 人、8-12 分钟讨论的开放问题。"
         "问题必须有明确背景、讨论目标和约束，不能编造用户经历；只输出问题文本，不输出角色、答案或 Markdown。"
         if mode == "group"
-        else "你是面试陪练系统的出题器。只能使用用户提供的经历和检索到的技能，不能编造经历。输出一道适合当前场景的问题，并在问题中体现考察目标。只输出问题文本。"
+        else "你是面试陪练系统的出题器。只能使用用户提供的 JD、简历明确证据和检索到的真实题库题目，不能编造经历。"
+        "保留检索题目的核心考察目标和难度，结合岗位真实职责与候选人背景改写成一道个性化问题；"
+        "如果简历没有相关证据，就设计核验候选人能力的问题，不要假设候选人做过某事。只输出问题文本。"
     )
     return [
         {

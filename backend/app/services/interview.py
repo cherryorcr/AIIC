@@ -65,6 +65,8 @@ class InterviewService:
         if not questions:
             raise ValueError("题库暂无可用题目")
         question = dict(questions[0])
+        question_source_id = str(question.get("question_id") or "")
+        matched["job_text"] = payload.get("job_text", "")
         generated = await self.router.complete(
             "question",
             question_prompt(mode, payload.get("role", ""), payload.get("user_profile", {}), matched),
@@ -73,6 +75,12 @@ class InterviewService:
         )
         if generated.get("ok") and generated.get("text", "").strip():
             question["question"] = generated["text"].strip()
+            question["source_question_id"] = question_source_id
+            question["personalized"] = True
+            question["generation_provider"] = generated.get("provider") or "strong_model"
+            question["personalization_basis"] = [
+                skill for skill in (question.get("skills") or matched.get("matched_skills") or []) if str(skill).strip()
+            ][:4]
         session = {
             "session_id": session_id,
             "user_id": payload.get("user_id"),

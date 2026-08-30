@@ -36,8 +36,18 @@ from app.services.auth import (
 )
 from app.services.documents import ALLOWED_EXTENSIONS, extract_document_text, parse_document
 from app.services.model_router import ModelRouter
+from app.services.matching import (
+    MATCH_SCORING_VERSION,
+    build_match_context,
+    deterministic_match_snapshot,
+    match_input_hash,
+    match_score_prompt,
+    match_score_schema,
+    match_target_key,
+    model_match_snapshot,
+)
 from app.services.prompts import SCENE_POLICIES
-from app.services.rag import GraphRAGService, MODE_TO_PROCESS, extract_skills, normalize_skill
+from app.services.rag import GraphRAGService, MODE_TO_PROCESS, extract_skills
 from app.services.sandbox import SandboxService
 from app.storage.db import Database
 
@@ -111,21 +121,33 @@ def list_scenes() -> dict[str, Any]:
 
 
 @app.post("/api/v1/matches")
-def preview_match(request: SessionCreate, http_request: Request, response: Response) -> dict[str, Any]:
-    """Preview role/skill/question matching without creating an interview session."""
+async def preview_match(request: SessionCreate, http_request: Request, response: Response) -> dict[str, Any]:
+    """Return a durable resume/JD score plus a live question-bank preview."""
+    user_id = _resolve_user(http_request, response)
     role = request.role
     job_text = request.job_text
     profile_payload = request.user_profile.model_dump()
+    job_skills: list[str] = []
     if request.job_id:
-        user_id = _resolve_user(http_request, response)
         job = db.get_job(str(request.job_id))
         if job is None or job.get("user_id") != user_id:
             raise HTTPException(status_code=404, detail="job_not_found")
-        job_text = job_text or str(job.get("jd_text") or job.get("job_text") or "")
-        if role == "通用软件开发工程师":
-            role = str(job.get("role") or job.get("title") or role)
-        if not any(profile_payload.get(key) for key in ("skills", "projects", "education", "experience")):
-            profile_payload = db.get_user_profile(user_id) or profile_payload
+        # A saved role owns its canonical JD. Client-side drafts must not
+        # silently change a persisted score when a user switches list items.
+        job_text = str(job.get("jd_text") or job.get("job_text") or "")
+        role = str(job.get("role") or job.get("title") or role)
+        job_skills = [str(value) for value in job.get("skills") or []]
+    stored_profile = db.get_user_profile(user_id) or {}
+    if any(stored_profile.get(key) for key in ("skills", "projects", "education", "experience", "summary")):
+        # Scores for saved materials always use the server-confirmed resume,
+        # not a possibly stale localStorage copy submitted by the browser.
+        profile_payload = stored_profile
+    context = build_match_context(
+        role=role,
+        job_text=job_text,
+        job_skills=job_skills,
+        profile=profile_payload,
+    )
     matched = rag.match(
         mode=request.mode,
         role=role,
@@ -134,34 +156,42 @@ def preview_match(request: SessionCreate, http_request: Request, response: Respo
         difficulty=request.difficulty,
     )
     questions = matched.get("questions", [])
-    # Match score is a stable snapshot of the candidate profile against this
-    # role's JD. It must not depend on how many questions happened to be
-    # retrieved, otherwise selecting a role or changing the question bank can
-    # make an unchanged resume/JD appear to have a different score.
-    required_skills = {
-        normalize_skill(skill)
-        for skill in extract_skills(f"{role} {job_text}")
-        if str(skill).strip()
-    }
-    profile_text = " ".join(
-        [
-            *(profile_payload.get("skills") or []),
-            *(profile_payload.get("projects") or []),
-            profile_payload.get("experience") or "",
-        ]
-    )
-    candidate_skills = {
-        normalize_skill(skill)
-        for skill in extract_skills(profile_text)
-        if str(skill).strip()
-    }
-    candidate_skills.update(
-        normalize_skill(skill)
-        for skill in profile_payload.get("skills") or []
-        if str(skill).strip()
-    )
-    profile_matched_skills = sorted(required_skills & candidate_skills)
-    score = round(100 * len(profile_matched_skills) / len(required_skills)) if required_skills else 0
+
+    input_hash = match_input_hash(context)
+    target_key = match_target_key(role, job_text, str(request.job_id) if request.job_id else None)
+    snapshot = db.get_match_snapshot(user_id, target_key, input_hash, MATCH_SCORING_VERSION)
+    score_cached = snapshot is not None
+    if snapshot is None:
+        score_payload = deterministic_match_snapshot(context)
+        if job_text.strip() or context["required_skills"]:
+            generated = await router.complete(
+                "match_score",
+                match_score_prompt(context, questions, request.mode),
+                response_schema=match_score_schema(),
+                temperature=0,
+                max_tokens=2400,
+            )
+            if generated.get("ok"):
+                parsed = router.parse_json(str(generated.get("text") or ""))
+                if parsed:
+                    score_payload = model_match_snapshot(
+                        context,
+                        parsed,
+                        questions,
+                        provider=str(generated.get("provider") or "strong_model"),
+                    )
+        snapshot = db.save_match_snapshot(
+            {
+                "user_id": user_id,
+                "target_key": target_key,
+                "input_hash": input_hash,
+                "scoring_version": MATCH_SCORING_VERSION,
+                **score_payload,
+            }
+        )
+    personalized = snapshot.get("personalized_questions")
+    if isinstance(personalized, list) and personalized:
+        questions = personalized
     confidences = [str(question.get("source_confidence") or "").lower() for question in questions]
     if any(value == "synthetic_mock" for value in confidences):
         source_confidence = "synthetic_mock"
@@ -173,11 +203,23 @@ def preview_match(request: SessionCreate, http_request: Request, response: Respo
         source_confidence = "observed"
     return {
         "role": role,
-        "match_score": score,
-        "required_skills": sorted(required_skills),
-        "profile_matched_skills": profile_matched_skills,
+        "match_score": int(snapshot.get("match_score", snapshot.get("score", 0))),
+        "score_breakdown": snapshot.get("score_breakdown", {}),
+        "score_explanation": snapshot.get("score_explanation", ""),
+        "score_strengths": snapshot.get("score_strengths", []),
+        "score_gaps": snapshot.get("score_gaps", context["skill_gaps"]),
+        "score_source": snapshot.get("score_source", snapshot.get("source", "deterministic")),
+        "score_cached": score_cached,
+        "score_snapshot_id": snapshot.get("id"),
+        "score_updated_at": snapshot.get("updated_at") or snapshot.get("created_at"),
+        "scoring_version": MATCH_SCORING_VERSION,
+        "required_skills": context["required_skills"],
+        "profile_matched_skills": context["profile_matched_skills"],
         "matched_skills": matched.get("matched_skills", []),
         "questions": questions,
+        "question_generation_source": (
+            "strong_model" if any(question.get("personalized") for question in questions) else "question_bank"
+        ),
         "source_confidence": source_confidence,
     }
 
@@ -638,24 +680,19 @@ def workspace_overview(request: Request, response: Response) -> dict[str, Any]:
         )
     )
 
-    raw_profile_skills = {
-        str(value).strip().lower() for value in profile.get("skills", []) if str(value).strip()
-    }
-    profile_skills = raw_profile_skills | set(extract_skills(" ".join(raw_profile_skills)))
-    required_values = (latest_job or {}).get("skills") or extract_skills(
-        str((latest_job or {}).get("jd_text") or "")
+    match_context = build_match_context(
+        role=str((latest_job or {}).get("role") or (latest_job or {}).get("title") or ""),
+        job_text=str((latest_job or {}).get("jd_text") or (latest_job or {}).get("job_text") or ""),
+        job_skills=[str(value) for value in (latest_job or {}).get("skills") or []],
+        profile=profile,
     )
-    raw_required_skills = {
-        str(value).strip().lower() for value in required_values if str(value).strip()
-    }
-    required_skills = raw_required_skills | set(
-        extract_skills(" ".join([*raw_required_skills, str((latest_job or {}).get("jd_text") or "")]))
-    )
-    matched_skills = sorted(profile_skills & required_skills) if has_target_job else []
-    skill_gaps = sorted(required_skills - profile_skills) if has_target_job else []
+    profile_skills = set(match_context["candidate_skills"])
+    required_skills = set(match_context["required_skills"])
+    matched_skills = match_context["profile_matched_skills"] if has_target_job else []
+    skill_gaps = match_context["skill_gaps"] if has_target_job else []
     # A readiness score is a comparison against a concrete target role. A
     # profile or training history alone must not look like a 50-point match.
-    skill_coverage = len(matched_skills) / len(required_skills) if required_skills else 0.0
+    skill_coverage = match_context["skill_coverage"] / 100 if has_target_job else 0.0
 
     completeness_fields = (
         profile.get("full_name"), profile.get("headline"), profile.get("summary"),
@@ -834,17 +871,17 @@ async def start_session(request: SessionCreate, http_request: Request, response:
         payload = request.model_dump()
         payload["user_id"] = _resolve_user(http_request, response)
         stored_profile = db.get_user_profile(payload["user_id"]) or {}
-        submitted_profile = payload.get("user_profile") or {}
-        if not any(submitted_profile.get(key) for key in ("skills", "projects", "education", "experience")):
+        if any(stored_profile.get(key) for key in ("skills", "projects", "education", "experience", "summary")):
+            # A practice request may carry an old localStorage profile. Once a
+            # resume is confirmed, it is canonical and training must never
+            # overwrite it with the browser's partial fallback payload.
             payload["user_profile"] = stored_profile
         if payload.get("job_id"):
             job = db.get_job(str(payload["job_id"]))
             if job is None or job.get("user_id") != payload["user_id"]:
                 raise HTTPException(status_code=404, detail="job_not_found")
-            if not payload.get("job_text"):
-                payload["job_text"] = str(job.get("jd_text") or job.get("job_text") or "")
-            if not payload.get("role") or payload.get("role") == "通用软件开发工程师":
-                payload["role"] = str(job.get("role") or job.get("title") or payload["role"])
+            payload["job_text"] = str(job.get("jd_text") or job.get("job_text") or "")
+            payload["role"] = str(job.get("role") or job.get("title") or payload["role"])
         return await interviews.start(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

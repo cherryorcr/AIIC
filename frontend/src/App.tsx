@@ -27,6 +27,7 @@ import {
   registerAccount,
   saveUserProfile,
   startSession,
+  subscribeWorkspaceUpdates,
   submitTurn,
   toggleFavorite,
   uploadDocument,
@@ -107,6 +108,9 @@ type Question = {
   sourceLicense?: string;
   sourceConfidence?: string;
   sourceVersion?: string;
+  personalized?: boolean;
+  sourceQuestionId?: string;
+  personalizationBasis?: string[];
   followUp: string;
   rubric: string[];
   tests?: Array<{
@@ -434,7 +438,6 @@ function Sidebar({ collapsed, mobileOpen, onClose, onToggle }: { collapsed: bool
             <NavLink key={path} className={({ isActive }) => (isActive ? "side-link active" : "side-link")} end={end} to={path} onClick={onClose}>
               <Icon size={18} />
               <span>{label}</span>
-              {label === "岗位匹配" ? <em>3</em> : null}
             </NavLink>
           ))}
           <span className="nav-label nav-label-spaced">管理</span>
@@ -477,12 +480,35 @@ function DashboardPage() {
   const [overview, setOverview] = useState<WorkspaceOverview | null>(null);
   const [overviewError, setOverviewError] = useState("");
   useEffect(() => {
-    getWorkspaceOverview()
-      .then(setOverview)
-      .catch((cause) => setOverviewError(cause instanceof Error ? cause.message : "准备度加载失败"));
+    let active = true;
+    const loadOverview = () => {
+      void getWorkspaceOverview()
+        .then((result) => {
+          if (!active) return;
+          setOverview(result);
+          setOverviewError("");
+        })
+        .catch((cause) => {
+          if (active) setOverviewError(cause instanceof Error ? cause.message : "准备度加载失败");
+        });
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") loadOverview();
+    };
+    loadOverview();
+    const unsubscribe = subscribeWorkspaceUpdates(loadOverview);
+    globalThis.addEventListener("focus", loadOverview);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      active = false;
+      unsubscribe();
+      globalThis.removeEventListener("focus", loadOverview);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
   }, []);
   const readiness = overview?.readiness;
   const score = readiness?.score ?? 0;
+  const hasTargetJob = Boolean(overview?.latest_job);
   const dashboardSessions: DashboardSession[] = (overview?.recent_sessions || []).map((item) => {
     const rawScore = Number(item.summary?.average_score ?? item.average_score);
     return {
@@ -549,21 +575,21 @@ function DashboardPage() {
             <div
               className="score-ring"
               style={{
-                background: `conic-gradient(var(--blue) 0 ${score}%, #e8edf5 ${score}% 100%)`,
+                background: `conic-gradient(var(--blue) 0 ${hasTargetJob ? score : 0}%, #e8edf5 ${hasTargetJob ? score : 0}% 100%)`,
               }}
             >
-              <span>{score}</span>
+              <span>{hasTargetJob ? score : "—"}</span>
               <small>/100</small>
             </div>
             <div className="readiness-copy">
               <strong>{readiness?.label || (overviewError ? "准备度暂不可用" : "正在读取个人工作区")}</strong>
               <p>{readiness?.skill_gaps.length ? `优先补齐：${readiness.skill_gaps.slice(0, 3).join("、")}` : "完善个人背景和目标 JD 后，系统会生成个性化能力缺口。"}</p>
               <div className="progress-line">
-                <span style={{ width: `${score}%` }} />
+                <span style={{ width: `${hasTargetJob ? score : 0}%` }} />
               </div>
               <div className="progress-meta">
                 <span>档案完整度 {readiness?.profile_completeness ?? 0}%</span>
-                <span>目标 85</span>
+                <span>{hasTargetJob ? "目标 85" : "保存 JD 后开始评分"}</span>
               </div>
             </div>
           </div>
@@ -748,6 +774,9 @@ function backendQuestionToQuestion(item: BackendQuestion, mode: ModeId, fallback
     sourceLicense: typeof item.source?.license === "string" ? item.source.license : sameQuestion ? fallback?.sourceLicense : undefined,
     sourceConfidence: item.source_confidence || (sameQuestion ? fallback?.sourceConfidence : undefined),
     sourceVersion: typeof item.source?.version === "string" ? item.source.version : sameQuestion ? fallback?.sourceVersion : undefined,
+    personalized: Boolean(item.personalized),
+    sourceQuestionId: item.source_question_id,
+    personalizationBasis: item.personalization_basis || [],
     followUp: item.follow_ups?.join(" ") || (sameQuestion ? fallback?.followUp : undefined) || "请补充一个具体事实或结果。",
     rubric: item.rubric?.length ? item.rubric : sameQuestion ? fallback?.rubric || [] : [],
     tests: item.tests || (sameQuestion ? fallback?.tests : undefined),
@@ -866,6 +895,7 @@ function PracticePage() {
           job_id: requestedJobId,
           job_text: savedProfile.job_text || "Python FastAPI PostgreSQL Redis Docker 系统设计",
           user_profile: {
+            ...savedProfile,
             skills: savedProfile.skills.length ? savedProfile.skills : ["Python", "FastAPI", "PostgreSQL"],
             projects: savedProfile.projects.length ? savedProfile.projects : ["TechMatch"],
           },
@@ -1907,7 +1937,7 @@ function MaterialsPage() {
 
 function MatchPage() {
   const navigate = useNavigate();
-  const [selectedRoleKey, setSelectedRoleKey] = useState("后端开发工程师");
+  const [selectedRoleKey, setSelectedRoleKey] = useState("");
   const [jobs, setJobs] = useState<
     Array<{
       id?: string;
@@ -1922,70 +1952,59 @@ function MatchPage() {
     }>
   >([]);
   const [profile, setProfile] = useState<UserProfile>(() => loadUserProfile());
-  const [draftJob, setDraftJob] = useState(() => profile.job_text || "Python FastAPI PostgreSQL Redis Docker 系统设计");
   const [match, setMatch] = useState<MatchResponse | null>(null);
   const [matchScores, setMatchScores] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const latestMatchRequest = useRef(0);
-  const fallbackRoles = [
-    {
-      id: undefined as string | undefined,
-      name: "后端开发工程师",
-      company: "互联网 / SaaS",
-      fallbackSkills: ["Python", "FastAPI", "PostgreSQL", "系统设计"],
-      gap: ["分布式一致性", "故障排查"],
-    },
-    {
-      id: undefined as string | undefined,
-      name: "算法工程师",
-      company: "AI 基础设施",
-      fallbackSkills: ["Python", "算法", "机器学习"],
-      gap: ["模型部署", "实验设计"],
-    },
-    {
-      id: undefined as string | undefined,
-      name: "数据分析师",
-      company: "消费 / 业务分析",
-      fallbackSkills: ["SQL", "指标设计", "Python"],
-      gap: ["因果推断", "业务沟通"],
-    },
-  ];
   const jobName = (job: (typeof jobs)[number]) => job.title || job.name || job.role || "未命名岗位";
   const jobKey = (job: (typeof jobs)[number], index: number) => String(job.id || job.job_id || `${jobName(job)}-${index}`);
-  const roles = jobs.length
-    ? jobs.map((job, index) => ({
-        id: job.id || job.job_id,
-        key: jobKey(job, index),
-        name: jobName(job),
-        company: job.company || "已保存岗位",
-        fallbackSkills: job.skills?.length ? job.skills : ["岗位技能"],
-        gap: ["待补强技能"],
-        jd_text: job.jd_text || job.job_text || "",
-      }))
-    : fallbackRoles.map((item) => ({ ...item, key: item.name, jd_text: "" }));
+  const roles = jobs.map((job, index) => ({
+    id: job.id || job.job_id,
+    key: jobKey(job, index),
+    name: jobName(job),
+    company: job.company || "已保存岗位",
+    fallbackSkills: job.skills?.length ? job.skills : [],
+    jd_text: job.jd_text || job.job_text || "",
+  }));
   const role = roles.find((item) => item.key === selectedRoleKey) ?? roles[0];
-  const selectedRole = role?.name || "通用软件开发工程师";
-  const matchedSkills = match ? (Array.isArray(match.profile_matched_skills) ? match.profile_matched_skills : match.matched_skills || []) : profile.skills.length ? profile.skills : role?.fallbackSkills || [];
+  const matchedSkills = match ? (Array.isArray(match.profile_matched_skills) ? match.profile_matched_skills : match.matched_skills || []) : [];
   const requiredSkills = match?.required_skills?.length ? match.required_skills : role?.fallbackSkills || [];
   const gapSkills = requiredSkills.filter((skill) => !matchedSkills.includes(skill));
 
-  function fallbackMatchScore(item: (typeof roles)[number]) {
-    const required = new Set((item.fallbackSkills || []).map((skill) => skill.trim().toLowerCase()));
-    const candidate = new Set(profile.skills.map((skill) => skill.trim().toLowerCase()));
-    if (!required.size) return 0;
-    return Math.round(([...required].filter((skill) => candidate.has(skill)).length / required.size) * 100);
-  }
-
   function scoreForRole(item: (typeof roles)[number]) {
-    return matchScores[item.key] ?? fallbackMatchScore(item);
+    return matchScores[item.key];
   }
 
-  const currentScore = role ? scoreForRole(role) : 0;
+  const currentScore = role ? scoreForRole(role) : undefined;
 
-  async function refreshMatch() {
-    if (!role) return;
-    const requestRoleKey = role.key;
+  useEffect(() => {
+    // Materials confirmation publishes this event after the server profile is
+    // updated. Re-read the profile and jobs so the score input hash changes and
+    // the API creates a fresh snapshot for every confirmed resume revision.
+    const refreshAfterMaterialsUpdate = () => {
+      setProfile(loadUserProfile());
+      setMatch(null);
+      setMatchScores({});
+      void listJobs()
+        .then((result) => {
+          setJobs(result);
+          if (!result.length) {
+            setSelectedRoleKey("");
+            return;
+          }
+          setSelectedRoleKey((current) => (result.some((job, index) => jobKey(job, index) === current) ? current : jobKey(result[0], 0)));
+        })
+        .catch(() => {
+          // The next regular refresh/retry will surface a visible error.
+        });
+    };
+    return subscribeWorkspaceUpdates(refreshAfterMaterialsUpdate);
+  }, []);
+
+  async function refreshMatch(target = role) {
+    if (!target) return;
+    const requestRoleKey = target.key;
     const requestId = ++latestMatchRequest.current;
     setLoading(true);
     setError("");
@@ -1993,12 +2012,10 @@ function MatchPage() {
     try {
       const result = await previewMatch({
         mode: "technical",
-        role: selectedRole,
-        job_id: role.id,
-        // A saved role owns its JD. The draft is only used by local fallback
-        // roles, so switching roles cannot accidentally reuse the prior JD.
-        job_text: jobs.length ? role.jd_text || role.fallbackSkills.join(" ") : draftJob,
-        user_profile: { skills: profile.skills, projects: profile.projects },
+        role: target.name,
+        job_id: target.id,
+        job_text: target.jd_text,
+        user_profile: profile,
         difficulty: "medium",
       });
       if (latestMatchRequest.current !== requestId) return;
@@ -2021,13 +2038,21 @@ function MatchPage() {
     let cancelled = false;
     void listJobs()
       .then((result) => {
-        if (cancelled || !result.length) return;
+        if (cancelled) return;
         setJobs(result);
-        const first = result[0];
-        setSelectedRoleKey((current) => (result.some((job, index) => jobKey(job, index) === current) ? current : jobKey(first, 0)));
+        if (result.length) {
+          const first = result[0];
+          setSelectedRoleKey((current) => (result.some((job, index) => jobKey(job, index) === current) ? current : jobKey(first, 0)));
+        } else {
+          setSelectedRoleKey("");
+          setMatch(null);
+        }
       })
-      .catch(() => {
-        /* local fallback roles remain usable */
+      .catch((cause) => {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : "岗位列表加载失败");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
       });
     return () => {
       cancelled = true;
@@ -2035,19 +2060,14 @@ function MatchPage() {
   }, []);
   useEffect(() => {
     if (role) void refreshMatch();
-  }, [selectedRoleKey, jobs, profile.skills, profile.projects]);
-  useEffect(() => {
-    // Cached scores belong to one profile snapshot. A resume/profile change
-    // must invalidate them before new previews return.
-    setMatchScores({});
-  }, [profile.skills, profile.projects]);
+  }, [selectedRoleKey, jobs, profile]);
   return (
     <div className="match-page">
       <section className="page-intro">
         <div>
           <span className="eyebrow">岗位匹配</span>
           <h2>把个人经历，映射到真实岗位。</h2>
-          <p>GraphRAG 会结合 JD、技能图谱和你的训练证据，给出可解释的匹配结果。</p>
+          <p>系统会结合已确认的 JD、简历和真实题库，生成可追溯的匹配评分和个性化训练题。</p>
         </div>
         <button className="secondary-button" type="button" onClick={() => navigate("/materials")}>
           <FolderOpen size={16} />
@@ -2078,37 +2098,42 @@ function MatchPage() {
             <Search size={16} className="muted-icon" />
           </div>
           <div className="role-list">
-            {roles.map((item) => (
-              <button
-                key={item.key}
-                type="button"
-                className={selectedRoleKey === item.key ? "role-list-item selected" : "role-list-item"}
-                onClick={() => {
-                  setSelectedRoleKey(item.key);
-                  if ("jd_text" in item && item.jd_text) setDraftJob(String(item.jd_text));
-                }}
-              >
-                <span className={`role-score score-${scoreForRole(item) >= 75 ? "high" : scoreForRole(item) >= 50 ? "mid" : "low"}`}>{scoreForRole(item)}</span>
-                <span>
-                  <strong>{item.name}</strong>
-                  <small>{item.company}</small>
-                </span>
-                <ArrowRight size={15} />
-              </button>
-            ))}
+            {roles.map((item) => {
+              const itemScore = scoreForRole(item);
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={selectedRoleKey === item.key ? "role-list-item selected" : "role-list-item"}
+                  onClick={() => {
+                    if (item.key === selectedRoleKey) return;
+                    setMatch(null);
+                    setSelectedRoleKey(item.key);
+                  }}
+                >
+                  <span className={`role-score ${itemScore === undefined ? "score-unrated" : `score-${itemScore >= 75 ? "high" : itemScore >= 50 ? "mid" : "low"}`}`}>{itemScore ?? "—"}</span>
+                  <span>
+                    <strong>{item.name}</strong>
+                    <small>{item.company}</small>
+                  </span>
+                  <ArrowRight size={15} />
+                </button>
+              );
+            })}
+            {!roles.length && !loading ? <p className="role-list-empty">还没有保存的岗位 JD</p> : null}
           </div>
           <button className="role-add-button" type="button" onClick={() => navigate("/materials")}>
             <Plus size={15} />
             上传新的 JD
           </button>
         </aside>
-        <div className="match-detail">
+        {role ? <div className="match-detail">
           <div className="match-detail-top">
             <div>
               <span className="eyebrow">当前匹配结果</span>
               <h3>{role.name}</h3>
               <p>
-                {role.company} · {loading ? "正在计算…" : "已同步数据库"}
+                {role.company} · {loading ? "正在生成固定评分…" : match ? "评分已固定" : "等待评分"}
               </p>
             </div>
             <button className="primary-button" type="button" onClick={() => navigate(`/practice?role=${encodeURIComponent(role.name)}${role.id ? `&job_id=${encodeURIComponent(role.id)}` : ""}`)}>
@@ -2120,12 +2145,12 @@ function MatchPage() {
             <div className="match-score-card">
               <span className="eyebrow">综合匹配度</span>
               <div className="large-score">
-                <strong>{loading ? "—" : currentScore}</strong>
+                <strong>{loading ? "—" : currentScore ?? "—"}</strong>
                 <span>/100</span>
               </div>
               <div className="score-caption">
                 <span className="status-dot" />
-                基于 {matchedSkills.length} 个技能节点计算
+                {match?.score_source === "strong_model" ? "大模型结合 JD 与简历评分" : "按 JD 与简历技能覆盖评分"}
               </div>
             </div>
             <div className="match-explanation">
@@ -2134,10 +2159,10 @@ function MatchPage() {
               </div>
               <div>
                 <strong>为什么匹配</strong>
-                <p>{match?.questions?.length ? `已从题库召回 ${match.questions.length} 道相关题目，覆盖 ${matchedSkills.slice(0, 4).join("、")}。` : "你的个人技能和项目会用于召回岗位相关题目，并在训练中持续更新匹配结果。"}</p>
+                <p>{match?.score_explanation || "评分只在简历或 JD 内容变化后重新生成，切换页面和重复点击不会改变结果。"}</p>
                 <div className="source-line">
                   <ShieldCheck size={14} />
-                  来源和匹配分数可在题库中追溯
+                  {match?.score_cached ? "已读取持久化评分快照" : "评分快照已保存到数据库"}
                 </div>
               </div>
             </div>
@@ -2159,9 +2184,10 @@ function MatchPage() {
                   {matchedSkills.map((skill, index) => (
                     <div className="skill-chip covered" key={skill}>
                       <span>{skill}</span>
-                      <strong>{Math.max(68, 96 - index * 7)}%</strong>
+                      <strong>{index === 0 ? "核心匹配" : "已覆盖"}</strong>
                     </div>
                   ))}
+                  {!matchedSkills.length ? <div className="skill-chip-empty">暂无明确覆盖技能</div> : null}
                 </div>
               </div>
               <div className="skill-column">
@@ -2170,7 +2196,7 @@ function MatchPage() {
                   建议补强
                 </span>
                 <div className="skill-chip-list">
-                  {(gapSkills.length ? gapSkills : role.gap).map((skill) => (
+                  {(match?.score_gaps?.length ? match.score_gaps : gapSkills).map((skill) => (
                     <div className="skill-chip gap" key={skill}>
                       <span>{skill}</span>
                       <button type="button" onClick={() => navigate("/practice")} aria-label={`训练 ${skill}`}>
@@ -2178,10 +2204,40 @@ function MatchPage() {
                       </button>
                     </div>
                   ))}
+                  {!(match?.score_gaps?.length || gapSkills.length) ? <div className="skill-chip-empty">暂无明确技能缺口</div> : null}
                 </div>
               </div>
             </div>
           </div>
+          {match?.questions?.length ? (
+            <div className="personalized-question-section">
+              <div className="section-heading">
+                <div>
+                  <span className="eyebrow">题目推荐</span>
+                  <h3>{match.question_generation_source === "strong_model" ? "结合你的背景生成" : "从真实题库召回"}</h3>
+                </div>
+                <span className="question-generation-badge">
+                  {match.question_generation_source === "strong_model" ? "强模型个性化" : "真实题库"}
+                </span>
+              </div>
+              <div className="personalized-question-list">
+                {match.questions.slice(0, 5).map((item, index) => (
+                  <div className="personalized-question-item" key={`${item.question_id}-${index}`}>
+                    <span className="personalized-question-index">{index + 1}</span>
+                    <div>
+                      <strong>{item.question}</strong>
+                      <small>
+                        {item.personalized && item.personalization_basis?.length
+                          ? `依据：${item.personalization_basis.join("、")}`
+                          : `考察：${(item.skills || []).join("、") || "岗位通用能力"}`}
+                      </small>
+                      {item.source_refs?.length ? <small>来源：{item.source_refs[0]}</small> : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <div className="match-trace">
             <div className="trace-step done">
               <span>
@@ -2189,7 +2245,7 @@ function MatchPage() {
               </span>
               <div>
                 <strong>JD 解析</strong>
-                <small>{draftJob.trim() ? "已保存岗位描述" : "等待 JD"}</small>
+                <small>{role.jd_text.trim() ? "已保存岗位描述" : "等待 JD"}</small>
               </div>
             </div>
             <div className="trace-line done-line" />
@@ -2211,7 +2267,14 @@ function MatchPage() {
               </div>
             </div>
           </div>
-        </div>
+        </div> : (
+          <div className="match-detail match-empty-detail">
+            <div className="empty-illustration"><FileText size={22} /></div>
+            <h3>先保存一份真实岗位 JD</h3>
+            <p>系统不会再用演示岗位生成伪匹配分。上传并确认 JD 后，才会结合已确认简历生成固定评分。</p>
+            <button className="primary-button" type="button" onClick={() => navigate("/materials")}>上传岗位 JD <ArrowRight size={15} /></button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2289,7 +2352,7 @@ function QuestionBankPage() {
         mode: selected.mode,
         role: selected.backend?.role || "后端开发工程师",
         job_text: profile.job_text || "Python FastAPI PostgreSQL Redis Docker 系统设计",
-        user_profile: { skills: profile.skills, projects: profile.projects },
+        user_profile: profile,
         difficulty: selected.difficulty === "高" || selected.difficulty === "hard" ? "hard" : selected.difficulty === "低" ? "easy" : "medium",
       });
       if (selected.backend) queueQuestion(selected.backend);

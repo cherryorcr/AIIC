@@ -10,6 +10,10 @@ export type BackendQuestion = {
   follow_ups?: string[];
   rubric?: string[];
   skills?: string[];
+  personalized?: boolean;
+  source_question_id?: string;
+  personalization_basis?: string[];
+  generation_provider?: string;
   difficulty?: string;
   source_refs?: string[];
   source_confidence?: string;
@@ -75,6 +79,15 @@ export type MatchResponse = {
   profile_matched_skills?: string[];
   questions: BackendQuestion[];
   match_score?: number;
+  score_breakdown?: Record<string, number>;
+  score_explanation?: string;
+  score_strengths?: string[];
+  score_gaps?: string[];
+  score_source?: "strong_model" | "deterministic" | string;
+  score_cached?: boolean;
+  score_snapshot_id?: string;
+  score_updated_at?: string;
+  scoring_version?: string;
   [key: string]: unknown;
 };
 
@@ -212,6 +225,17 @@ export type AlgorithmResult = {
 
 export type ApiError = Error & { status?: number };
 
+const WORKSPACE_UPDATED_EVENT = "techmatch:workspace-updated";
+
+function notifyWorkspaceUpdated() {
+  globalThis.dispatchEvent?.(new Event(WORKSPACE_UPDATED_EVENT));
+}
+
+export function subscribeWorkspaceUpdates(listener: () => void) {
+  globalThis.addEventListener?.(WORKSPACE_UPDATED_EVENT, listener);
+  return () => globalThis.removeEventListener?.(WORKSPACE_UPDATED_EVENT, listener);
+}
+
 async function request<T>(path: string, init?: RequestInit, options: RequestOptions = {}): Promise<T> {
   const timeoutMs = options.timeoutMs ?? 12000;
   const retries = options.retries ?? 2;
@@ -269,7 +293,7 @@ async function request<T>(path: string, init?: RequestInit, options: RequestOpti
   throw lastError || new Error("网络请求失败");
 }
 
-export function startSession(input: { mode: ModeId; role: string; job_text: string; user_profile: { skills: string[]; projects: string[] }; difficulty?: "easy" | "medium" | "hard"; job_id?: string }) {
+export function startSession(input: { mode: ModeId; role: string; job_text: string; user_profile: UserProfile; difficulty?: "easy" | "medium" | "hard"; job_id?: string }) {
   return request<StartSessionResponse>(
     "/api/v1/sessions",
     { method: "POST", body: JSON.stringify(input) },
@@ -284,8 +308,8 @@ export function startSession(input: { mode: ModeId; role: string; job_text: stri
 }
 
 /** Preview a job match without creating a persisted interview session. */
-export function previewMatch(input: { mode: ModeId; role: string; job_text: string; user_profile: { skills: string[]; projects: string[] }; difficulty?: "easy" | "medium" | "hard"; job_id?: string }) {
-  return request<MatchResponse>("/api/v1/matches", { method: "POST", body: JSON.stringify(input) }, { timeoutMs: 20000, retries: 1 });
+export function previewMatch(input: { mode: ModeId; role: string; job_text: string; user_profile: UserProfile; difficulty?: "easy" | "medium" | "hard"; job_id?: string }) {
+  return request<MatchResponse>("/api/v1/matches", { method: "POST", body: JSON.stringify(input) }, { timeoutMs: 120000, retries: 0 });
 }
 
 export function submitTurn(
@@ -319,7 +343,10 @@ export function submitTurn(
       timeoutMs: 120000,
       retries: 0,
     },
-  );
+  ).then((result) => {
+    notifyWorkspaceUpdated();
+    return result;
+  });
 }
 
 export function runAlgorithm(
@@ -424,6 +451,9 @@ export function completeSession(sessionId: string) {
   }>(`/api/v1/sessions/${encodeURIComponent(sessionId)}/complete`, {
     method: "POST",
     body: JSON.stringify({}),
+  }).then((result) => {
+    notifyWorkspaceUpdated();
+    return result;
   });
 }
 
@@ -457,11 +487,14 @@ export async function getDocument(documentId: string) {
 /** Persist the user-reviewed extraction into the canonical profile or job record. */
 export async function confirmDocument(documentId: string, payload: Record<string, unknown>) {
   const result = await request<DocumentParseResponse>(`/api/v1/documents/${encodeURIComponent(documentId)}/confirm`, { method: "POST", body: JSON.stringify(payload) }, { timeoutMs: 30000, retries: 0 });
+  notifyWorkspaceUpdated();
   return result.document || result;
 }
 
 export async function deleteDocument(documentId: string) {
-  return request<{ status?: string }>(`/api/v1/documents/${encodeURIComponent(documentId)}`, { method: "DELETE" }, { retries: 0 });
+  const result = await request<{ status?: string }>(`/api/v1/documents/${encodeURIComponent(documentId)}`, { method: "DELETE" }, { retries: 0 });
+  notifyWorkspaceUpdated();
+  return result;
 }
 
 export async function listFavorites(limit = 500): Promise<{ ids: string[]; items: BackendQuestion[] }> {
@@ -598,6 +631,7 @@ export async function saveUserProfile(profile: UserProfile) {
   } catch {
     /* local fallback is intentional */
   }
+  notifyWorkspaceUpdated();
   return profile;
 }
 

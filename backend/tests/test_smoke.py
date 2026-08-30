@@ -33,7 +33,7 @@ def reset_database():
     db.init()
     with db._lock, db._conn:  # noqa: SLF001 - explicit test-only isolation
         for table in (
-            "feedback", "turns", "reports", "question_favorites", "sessions", "auth_sessions",
+            "feedback", "turns", "reports", "question_favorites", "sessions", "match_snapshots", "auth_sessions",
             "model_invocations", "user_profiles", "jobs", "users", "graph_edges",
             "question_skills", "questions", "skills", "sources",
             "candidate_documents",
@@ -180,12 +180,53 @@ def test_match_score_is_stable_profile_jd_coverage_not_question_count():
         second_json = second.json()
         assert first_json["match_score"] == 50
         assert first_json["match_score"] == second_json["match_score"]
+        assert first_json["score_cached"] is False
+        assert second_json["score_cached"] is True
+        assert first_json["score_snapshot_id"] == second_json["score_snapshot_id"]
+        assert first_json["score_source"] == "deterministic"
         assert set(first_json["required_skills"]) == {"python", "fastapi", "postgresql", "redis"}
         assert set(first_json["profile_matched_skills"]) == {"python", "fastapi"}
 
         # Retrieval size is unrelated to the profile/JD score.
         assert first_json["questions"]
         assert first_json["match_score"] != 50 + len(first_json["matched_skills"]) * 5 + min(len(first_json["questions"]), 5) * 2
+
+
+def test_model_match_score_is_generated_once_then_loaded_from_snapshot(monkeypatch):
+    from app.main import router
+
+    calls = 0
+
+    async def fake_complete(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return {
+            "ok": True,
+            "text": (
+                '{"skill_coverage":80,"experience_relevance":70,'
+                '"project_evidence":60,"role_alignment":50,'
+                '"strengths":["Python"],"gaps":["PostgreSQL"],'
+                '"explanation":"技能与经历相关，但数据库证据不足。"}'
+            ),
+        }
+
+    monkeypatch.setattr(router, "complete", fake_complete)
+    payload = {
+        "mode": "technical",
+        "role": "后端开发工程师",
+        "job_text": "Python FastAPI PostgreSQL",
+        "user_profile": {"skills": ["Python", "FastAPI"], "projects": ["API 服务"]},
+    }
+    with TestClient(app) as client:
+        first = client.post("/api/v1/matches", json=payload).json()
+        second = client.post("/api/v1/matches", json=payload).json()
+
+    assert calls == 1
+    assert first["match_score"] == 72
+    assert first["score_source"] == "strong_model"
+    assert first["score_cached"] is False
+    assert second["score_cached"] is True
+    assert second["score_snapshot_id"] == first["score_snapshot_id"]
 
 
 def test_match_preview_job_id_uses_owned_saved_jd_and_profile():
@@ -213,6 +254,100 @@ def test_match_preview_job_id_uses_owned_saved_jd_and_profile():
             json={"mode": "technical", "job_id": job_id},
         )
         assert denied.status_code == 404
+
+
+def test_match_snapshot_is_recomputed_after_confirmed_profile_changes():
+    with TestClient(app) as client:
+        assert client.put("/api/v1/profile", json={"skills": ["Python"], "projects": []}).status_code == 200
+        saved = client.post(
+            "/api/v1/jobs",
+            json={"title": "后端岗位", "jd_text": "Python FastAPI PostgreSQL"},
+        )
+        job_id = saved.json()["job"]["id"]
+        first = client.post("/api/v1/matches", json={"mode": "technical", "job_id": job_id}).json()
+        assert first["score_cached"] is False
+
+        # A confirmed resume update changes the canonical profile input hash;
+        # the old score must not remain attached to the saved role.
+        assert client.put(
+            "/api/v1/profile",
+            json={"skills": ["Python", "FastAPI", "PostgreSQL"], "projects": ["TechMatch"]},
+        ).status_code == 200
+        second = client.post("/api/v1/matches", json={"mode": "technical", "job_id": job_id}).json()
+        assert second["score_cached"] is False
+        assert second["score_snapshot_id"] != first["score_snapshot_id"]
+        assert second["profile_matched_skills"] == ["fastapi", "postgresql", "python"]
+        assert second["match_score"] >= first["match_score"]
+
+
+def test_match_generates_traceable_personalized_questions_from_retrieved_bank(monkeypatch):
+    import json
+
+    from app.main import rag, router
+
+    source = {
+        "question_id": "Q-SOURCE-001",
+        "question": "请设计一个高并发 API 服务。",
+        "skills": ["系统设计", "API 设计"],
+        "rubric": ["容量假设明确", "说明一致性取舍"],
+        "follow_ups": ["依赖超时如何止损？"],
+        "source_refs": ["https://example.test/public-question"],
+        "source_confidence": "high",
+    }
+    prompts = []
+
+    def fake_match(**_kwargs):
+        return {"matched_skills": ["系统设计"], "questions": [source]}
+
+    async def fake_complete(_task, messages, **_kwargs):
+        prompts.append(messages)
+        return {
+            "ok": True,
+            "provider": "strong",
+            "text": json.dumps(
+                {
+                    "skill_coverage": 80,
+                    "experience_relevance": 75,
+                    "project_evidence": 70,
+                    "role_alignment": 85,
+                    "strengths": ["Python"],
+                    "gaps": ["分布式系统"],
+                    "explanation": "岗位方向与项目经验基本匹配。",
+                    "personalized_questions": [
+                        {
+                            "source_question_id": "Q-SOURCE-001",
+                            "question": "你在 TechMatch 的 FastAPI 服务中如何设计高并发 API，并说明数据一致性取舍？",
+                            "follow_ups": ["如果 PostgreSQL 延迟升高，你会如何止损？"],
+                            "personalization_basis": ["简历项目：TechMatch", "简历技能：FastAPI", "JD：高并发 API"],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        }
+
+    monkeypatch.setattr(rag, "match", fake_match)
+    monkeypatch.setattr(router, "complete", fake_complete)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/matches",
+            json={
+                "mode": "technical",
+                "role": "后端工程师",
+                "job_text": "负责高并发 API，要求 Python FastAPI PostgreSQL",
+                "user_profile": {"skills": ["Python", "FastAPI"], "projects": ["TechMatch"]},
+            },
+        )
+    assert response.status_code == 200
+    body = response.json()
+    question = body["questions"][0]
+    assert body["question_generation_source"] == "strong_model"
+    assert question["personalized"] is True
+    assert question["source_question_id"] == "Q-SOURCE-001"
+    assert question["source_refs"] == ["https://example.test/public-question"]
+    assert question["rubric"] == source["rubric"]
+    assert question["personalization_basis"]
+    assert any("TechMatch" in message["content"] for batch in prompts for message in batch)
 
 
 def test_algorithm_runner_rejects_forbidden_code():
@@ -462,6 +597,54 @@ def test_readiness_starts_at_zero_until_a_target_job_exists():
         assert readiness["matched_skills"] == []
         assert readiness["skill_gaps"] == []
         assert overview.json()["counts"]["skills"] == 2
+
+
+def test_readiness_updates_after_a_training_answer_for_target_job():
+    with TestClient(app) as client:
+        assert client.put(
+            "/api/v1/profile",
+            json={
+                "full_name": "张三",
+                "headline": "后端开发工程师",
+                "summary": "负责 API 服务开发",
+                "experience": "使用 Python 开发后端服务",
+                "skills": ["Python"],
+                "projects": ["TechMatch"],
+            },
+        ).status_code == 200
+        saved = client.post(
+            "/api/v1/jobs",
+            json={"title": "后端开发工程师", "jd_text": "Python FastAPI PostgreSQL"},
+        )
+        job_id = saved.json()["job"]["id"]
+        before = client.get("/api/v1/workspace/overview").json()["readiness"]
+
+        started = client.post(
+            "/api/v1/sessions",
+            json={
+                "mode": "technical",
+                "role": "错误的本地岗位名",
+                "job_id": job_id,
+                "job_text": "错误的本地 JD",
+                "user_profile": {"skills": ["过期本地技能"], "projects": []},
+            },
+        )
+        assert started.status_code == 200
+        session = started.json()
+        answered = client.post(
+            f"/api/v1/sessions/{session['session_id']}/turns",
+            json={
+                "question_id": session["question_id"],
+                "answer_text": "我在 TechMatch 中使用 Python 优化接口，延迟下降 20%。",
+            },
+        )
+        assert answered.status_code == 200
+
+        after = client.get("/api/v1/workspace/overview").json()["readiness"]
+        assert before["training_score"] == 0
+        assert after["training_score"] > 0
+        assert after["profile_completeness"] == before["profile_completeness"]
+        assert after["score"] > before["score"]
 
 
 def test_model_fallback_is_recorded_with_telemetry():
