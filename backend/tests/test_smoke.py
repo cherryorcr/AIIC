@@ -32,7 +32,11 @@ def reset_database():
 
     db.init()
     with db._lock, db._conn:  # noqa: SLF001 - explicit test-only isolation
-        for table in ("feedback", "turns", "sessions", "graph_edges", "question_skills", "questions", "skills", "sources"):
+        for table in (
+            "candidate_documents", "feedback", "turns", "reports", "question_favorites",
+            "sessions", "model_invocations", "user_profiles", "jobs", "users",
+            "graph_edges", "question_skills", "questions", "skills", "sources",
+        ):
             db._conn.execute(f"DELETE FROM {table}")
     db.seed_questions(rag._load())
     rag.reload()
@@ -214,3 +218,57 @@ def test_session_can_be_completed_and_reported():
         assert completed.json()["status"] == "completed"
         summary = client.get(f"/api/v1/sessions/{sid}")
         assert summary.json()["session"]["status"] == "completed"
+
+
+def test_candidate_document_upload_parse_confirm_and_ownership():
+    with TestClient(app) as client:
+        created = client.post("/api/v1/users/temporary", json={"display_name": "资料用户"})
+        uid = created.json()["user"]["id"]
+        headers = {"X-User-Id": uid}
+        upload = client.post(
+            "/api/v1/documents/parse",
+            headers=headers,
+            files={"file": ("resume.txt", "张三\nPython FastAPI\nTechMatch 项目", "text/plain")},
+            data={"kind": "resume"},
+        )
+        assert upload.status_code == 200
+        document = upload.json()["document"]
+        assert document["status"] == "parsed"
+        assert document["extracted_text"].startswith("张三")
+        assert "raw" not in document
+        document_id = document["id"]
+
+        confirmed = client.post(
+            f"/api/v1/documents/{document_id}/confirm",
+            headers=headers,
+            json={"parsed": {"profile": {"full_name": "张三", "skills": ["Python"], "projects": ["TechMatch"]}}},
+        )
+        assert confirmed.status_code == 200
+        assert client.get("/api/v1/profile", headers=headers).json()["profile"]["full_name"] == "张三"
+
+        other = client.post("/api/v1/users/temporary", json={"display_name": "其他用户"})
+        other_headers = {"X-User-Id": other.json()["user"]["id"]}
+        assert client.get(f"/api/v1/documents/{document_id}", headers=other_headers).status_code == 404
+        assert client.delete(f"/api/v1/documents/{document_id}", headers=headers).status_code == 200
+
+
+def test_candidate_document_rejects_unsupported_and_oversized_uploads():
+    with TestClient(app) as client:
+        headers = {"X-User-Id": "doc-format-user"}
+        bad = client.post(
+            "/api/v1/documents/parse", headers=headers,
+            files={"file": ("resume.exe", b"MZ", "application/octet-stream")}, data={"kind": "resume"},
+        )
+        assert bad.status_code == 415
+        huge = client.post(
+            "/api/v1/documents/parse", headers=headers,
+            files={"file": ("resume.txt", b"x" * (5 * 1024 * 1024 + 1), "text/plain")}, data={"kind": "resume"},
+        )
+        assert huge.status_code == 413
+
+
+def test_candidate_document_postgres_migration_is_checked_in():
+    migration = Path(__file__).resolve().parents[1] / "migrations" / "001_postgres_schema.sql"
+    sql = migration.read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS candidate_documents" in sql
+    assert "candidate resume and job-description documents" in sql

@@ -66,6 +66,7 @@ def _copy_sqlite(cur, sqlite_path: Path) -> int:
         "schema_migrations", "users", "user_profiles", "jobs", "sessions",
         "sources", "skills", "questions", "question_skills", "graph_edges",
         "question_favorites", "turns", "feedback", "model_invocations", "reports",
+        "candidate_documents",
     ]
     copied = 0
     with sqlite3.connect(sqlite_path) as source:

@@ -350,6 +350,22 @@ class Database:
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL,
                     FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE SET NULL
                 );
+                CREATE TABLE IF NOT EXISTS candidate_documents (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+                    extracted_text TEXT NOT NULL DEFAULT '',
+                    parsed_json TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'uploaded',
+                    provider TEXT,
+                    error TEXT,
+                    linked_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
                 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
                 CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs(user_id, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_reports_user ON reports(user_id, updated_at);
@@ -357,6 +373,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_questions_process ON questions(process_type);
                 CREATE INDEX IF NOT EXISTS idx_edges_from ON graph_edges(from_type, from_id);
                 CREATE INDEX IF NOT EXISTS idx_favorites_user ON question_favorites(user_id);
+                CREATE INDEX IF NOT EXISTS idx_candidate_documents_user ON candidate_documents(user_id, updated_at);
                 """
             )
             # Databases created by an earlier MVP release already contain the
@@ -403,6 +420,10 @@ class Database:
             self._conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, description, applied_at) VALUES (?, ?, ?)",
                 (4, "model invocation token, cost and retry telemetry", utc_now()),
+            )
+            self._conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, description, applied_at) VALUES (?, ?, ?)",
+                (5, "candidate resume and job-description documents", utc_now()),
             )
 
     def seed_questions(self, items: list[dict[str, Any]], *, prune: bool = False) -> int:
@@ -692,6 +713,80 @@ class Database:
     # ------------------------------------------------------------------
     # User/profile/job/report persistence
     # ------------------------------------------------------------------
+    def save_candidate_document(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Persist extracted document text and structured result, never bytes."""
+        import uuid
+
+        document_id = str(payload.get("id") or f"doc-{uuid.uuid4().hex}")
+        user_id = str(payload["user_id"])
+        if not self.get_user(user_id):
+            self.create_temp_user(user_id)
+        now = utc_now()
+        parsed = payload.get("parsed_json", payload.get("parsed", {}))
+        if not isinstance(parsed, dict):
+            parsed = {}
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO candidate_documents
+                (id, user_id, kind, filename, content_type, extracted_text, parsed_json,
+                 status, provider, error, linked_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    user_id=excluded.user_id, kind=excluded.kind, filename=excluded.filename,
+                    content_type=excluded.content_type, extracted_text=excluded.extracted_text,
+                    parsed_json=excluded.parsed_json, status=excluded.status, provider=excluded.provider,
+                    error=excluded.error, linked_id=excluded.linked_id, updated_at=excluded.updated_at
+                """,
+                (
+                    document_id, user_id, str(payload.get("kind") or "resume"),
+                    str(payload.get("filename") or "document"),
+                    str(payload.get("content_type") or "application/octet-stream"),
+                    str(payload.get("extracted_text") or ""),
+                    json.dumps(parsed, ensure_ascii=False),
+                    str(payload.get("status") or "uploaded"), payload.get("provider"),
+                    payload.get("error"), payload.get("linked_id"),
+                    payload.get("created_at") or now, now,
+                ),
+            )
+        return self.get_candidate_document(document_id) or {"id": document_id, **payload}
+
+    def get_candidate_document(self, document_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM candidate_documents WHERE id = ?", (document_id,)).fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            item["parsed"] = decode_json(item.pop("parsed_json"), {})
+            return item
+
+    def list_candidate_documents(self, user_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM candidate_documents WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?",
+                (user_id, max(1, min(int(limit), 500))),
+            ).fetchall()
+            result = []
+            for row in rows:
+                item = dict(row)
+                item["parsed"] = decode_json(item.pop("parsed_json"), {})
+                result.append(item)
+            return result
+
+    def delete_candidate_document(self, document_id: str, user_id: str) -> bool:
+        with self._lock, self._conn:
+            result = self._conn.execute(
+                "DELETE FROM candidate_documents WHERE id = ? AND user_id = ?", (document_id, user_id)
+            )
+            return result.rowcount > 0
+
+    # Short aliases keep integrations that refer to generic "documents" APIs
+    # compatible with the explicit candidate-document storage methods.
+    save_document = save_candidate_document
+    get_document = get_candidate_document
+    list_documents = list_candidate_documents
+    delete_document = delete_candidate_document
+
     def create_temp_user(
         self,
         user_id: str | None = None,

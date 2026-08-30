@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
-from fastapi import Body, FastAPI, Header, HTTPException, Request, Response
+from fastapi import Body, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -12,6 +13,7 @@ from app.config import settings
 from app.schemas.models import (
     AlgorithmRunRequest,
     AnswerRequest,
+    DocumentConfirmRequest,
     KnowledgeItemCreate,
     KnowledgeItemUpdate,
     JobCreate,
@@ -22,6 +24,7 @@ from app.schemas.models import (
     UserProfileUpdate,
 )
 from app.services.interview import InterviewService
+from app.services.documents import ALLOWED_EXTENSIONS, extract_document_text, parse_document
 from app.services.model_router import ModelRouter
 from app.services.prompts import SCENE_POLICIES
 from app.services.rag import GraphRAGService, extract_skills
@@ -212,6 +215,141 @@ def put_profile(request: UserProfileUpdate, http_request: Request, response: Res
     uid = _resolve_user(http_request, response)
     profile = db.save_user_profile(uid, request.model_dump())
     return {"user_id": uid, "profile": profile, "status": "saved"}
+
+
+@app.post("/api/v1/documents/parse")
+async def parse_candidate_document(
+    request: Request,
+    response: Response,
+    file: UploadFile = File(...),
+    kind: str = Form(...),
+) -> dict[str, Any]:
+    """Upload and parse a resume or JD into a reviewable draft."""
+    kind = {
+        "resume": "resume",
+        "jd": "job_description",
+        "job": "job_description",
+        "job_description": "job_description",
+    }.get(kind, kind)
+    if kind not in {"resume", "job_description"}:
+        raise HTTPException(status_code=422, detail="document_kind_invalid")
+    uid = _resolve_user(request, response)
+    filename = Path(file.filename or "document").name
+    suffix = Path(filename).suffix.lower()
+    if suffix not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=415, detail="unsupported_document_type")
+    # Read one byte past the limit so oversized uploads can be rejected before
+    # parser allocation.  The binary is held only for this request.
+    max_bytes = max(1, int(settings.document_max_bytes))
+    data = await file.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise HTTPException(status_code=413, detail="document_too_large")
+    content_type = file.content_type or "application/octet-stream"
+    try:
+        extracted_text = extract_document_text(
+            filename, content_type, data, max_chars=max(1, int(settings.document_max_text_chars))
+        )
+    except ValueError as exc:
+        # Keep a failed record so the UI can show what happened without
+        # persisting the original binary or its contents.
+        db.save_candidate_document(
+            {
+                "user_id": uid,
+                "kind": kind,
+                "filename": filename,
+                "content_type": content_type,
+                "status": "failed",
+                "error": str(exc),
+            }
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    parsed_result = await parse_document(kind, extracted_text, router)  # type: ignore[arg-type]
+    document = db.save_candidate_document(
+        {
+            "user_id": uid,
+            "kind": kind,
+            "filename": filename,
+            "content_type": content_type,
+            "extracted_text": extracted_text,
+            "parsed_json": parsed_result["parsed"],
+            "status": "parsed",
+            "provider": parsed_result.get("provider"),
+            "error": parsed_result.get("error"),
+        }
+    )
+    return {"document": document, "status": "needs_confirmation"}
+
+
+@app.get("/api/v1/documents")
+def list_candidate_documents(request: Request, response: Response, limit: int = 100) -> dict[str, Any]:
+    uid = _resolve_user(request, response)
+    return {"documents": db.list_candidate_documents(uid, max(1, min(limit, 500)))}
+
+
+@app.get("/api/v1/documents/{document_id}")
+def get_candidate_document(document_id: str, request: Request, response: Response) -> dict[str, Any]:
+    uid = _resolve_user(request, response)
+    document = db.get_candidate_document(document_id)
+    if document is None or document.get("user_id") != uid:
+        raise HTTPException(status_code=404, detail="document_not_found")
+    return {"document": document}
+
+
+@app.post("/api/v1/documents/{document_id}/confirm")
+def confirm_candidate_document(
+    document_id: str,
+    payload: DocumentConfirmRequest,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    """Persist the human-reviewed resume/JD extraction to its canonical table."""
+    uid = _resolve_user(request, response)
+    document = db.get_candidate_document(document_id)
+    if document is None or document.get("user_id") != uid:
+        raise HTTPException(status_code=404, detail="document_not_found")
+    reviewed = payload.parsed or {}
+    if not isinstance(reviewed, dict):
+        raise HTTPException(status_code=422, detail="parsed_payload_invalid")
+    kind = str(document.get("kind"))
+    content = reviewed.get("profile" if kind == "resume" else "job")
+    if not isinstance(content, dict):
+        # Accept the compact form sent by clients that edit the inner object.
+        content = reviewed
+    if kind == "resume":
+        existing = db.get_user_profile(uid) or {}
+        allowed = {
+            "full_name", "headline", "summary", "education", "experience",
+            "skills", "projects", "achievements", "constraints",
+        }
+        merged = {key: value for key, value in existing.items() if key in allowed}
+        merged.update({key: content[key] for key in allowed if key in content})
+        profile = db.save_user_profile(uid, merged)
+        linked_id = uid
+        resource = {"profile": profile}
+    elif kind == "job_description":
+        allowed = {
+            "title", "company", "role", "summary", "skills", "responsibilities",
+            "requirements", "seniority", "location", "jd_text",
+        }
+        job_payload = {key: content[key] for key in allowed if key in content}
+        job_payload["jd_text"] = job_payload.get("jd_text") or str(document.get("extracted_text") or "")
+        saved_job = db.save_job(uid, job_payload)
+        linked_id = str(saved_job.get("id") or saved_job.get("job_id"))
+        resource = {"job": saved_job}
+    else:  # defensive check for rows created outside the API
+        raise HTTPException(status_code=400, detail="document_kind_invalid")
+    updated = dict(document)
+    updated.update({"parsed": reviewed, "status": "confirmed", "linked_id": linked_id, "error": None})
+    document = db.save_candidate_document(updated)
+    return {"document": document, "status": "confirmed", **resource}
+
+
+@app.delete("/api/v1/documents/{document_id}")
+def delete_candidate_document(document_id: str, request: Request, response: Response) -> dict[str, Any]:
+    uid = _resolve_user(request, response)
+    if not db.delete_candidate_document(document_id, uid):
+        raise HTTPException(status_code=404, detail="document_not_found")
+    return {"document_id": document_id, "status": "deleted"}
 
 
 @app.get("/api/v1/jobs")

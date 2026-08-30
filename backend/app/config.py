@@ -62,6 +62,8 @@ class Settings:
     sandbox_max_processes: int = int(os.getenv("SANDBOX_MAX_PROCESSES", "16"))
     sandbox_max_file_bytes: int = int(os.getenv("SANDBOX_MAX_FILE_BYTES", "1048576"))
     sandbox_enabled: bool = _bool("SANDBOX_ENABLED", True)
+    document_max_bytes: int = int(os.getenv("DOCUMENT_MAX_BYTES", str(5 * 1024 * 1024)))
+    document_max_text_chars: int = int(os.getenv("DOCUMENT_MAX_TEXT_CHARS", "40000"))
 
 
 settings = Settings()
