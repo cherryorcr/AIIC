@@ -5,7 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-InterviewMode = Literal["technical", "algorithm", "behavioral", "stress", "case", "research", "hr"]
+InterviewMode = Literal["technical", "algorithm", "behavioral", "stress", "case", "research", "hr", "group"]
 Difficulty = Literal["easy", "medium", "hard"]
 
 
@@ -181,6 +181,10 @@ class AnswerRequest(BaseModel):
     code: str | None = None
     language: str = "python"
     tests: list[dict[str, Any]] = Field(default_factory=list)
+    # A supplement/revision is evaluated against an earlier turn even when
+    # the session has already advanced to a follow-up question.
+    revision_of: str | None = None
+    answer_mode: Literal["answer", "supplement", "retry"] = "answer"
 
 
 class AlgorithmRunRequest(BaseModel):
@@ -212,6 +216,10 @@ class Feedback(BaseModel):
     next_question: str | None = None
     next_action: str = "进入下一题"
     source_refs: list[str] = Field(default_factory=list)
+    # Present only for the group-interview scene. The simulated participant
+    # response gives the candidate a concrete next interaction to address.
+    group_phase: str | None = None
+    group_reaction: dict[str, Any] | None = None
 
 
 class TurnResponse(BaseModel):

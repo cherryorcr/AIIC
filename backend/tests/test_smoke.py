@@ -65,6 +65,60 @@ def test_start_and_answer():
         assert answered.json()["feedback"]["evidence_quotes"]
 
 
+def test_group_interview_returns_simulated_reaction():
+    with TestClient(app) as client:
+        started = client.post(
+            "/api/v1/sessions",
+            json={"mode": "group", "role": "产品经理", "job_text": "沟通协作和指标设计"},
+        )
+        assert started.status_code == 200
+        payload = started.json()
+        assert payload["question_id"] == "Q-GROUP-001"
+        answered = client.post(
+            f"/api/v1/sessions/{payload['session_id']}/turns",
+            json={
+                "question_id": payload["question_id"],
+                "answer_text": "我会先澄清目标和预算，再让每位成员给出指标，最后按影响和成本排序。",
+            },
+        )
+        assert answered.status_code == 200
+        feedback = answered.json()["feedback"]
+        assert feedback["group_phase"]
+        assert feedback["group_reaction"]["speaker"]
+        assert set(feedback["scores"]) == {"problem_framing", "collaboration", "consensus", "time_management"}
+
+
+def test_revision_creates_child_turn_without_advancing_cursor():
+    with TestClient(app) as client:
+        started = client.post("/api/v1/sessions", json={"mode": "technical", "role": "后端工程师"})
+        assert started.status_code == 200
+        payload = started.json()
+        sid = payload["session_id"]
+        first = client.post(
+            f"/api/v1/sessions/{sid}/turns",
+            json={"question_id": payload["question_id"], "answer_text": "我在项目中优化接口，延迟下降 20%，并用压测验证。"},
+        )
+        assert first.status_code == 200
+        before = client.get(f"/api/v1/sessions/{sid}/summary").json()
+        revised = client.post(
+            f"/api/v1/sessions/{sid}/turns",
+            json={
+                "question_id": payload["question_id"],
+                "answer_text": "补充：我增加了缓存和监控，并在发布后持续复盘。",
+                "revision_of": first.json()["turn_id"],
+                "answer_mode": "supplement",
+            },
+        )
+        assert revised.status_code == 200
+        after = client.get(f"/api/v1/sessions/{sid}/summary").json()
+        turns = after["turns"]
+        child = next(item for item in turns if item["id"] == revised.json()["turn_id"])
+        assert child["parent_turn_id"] == first.json()["turn_id"]
+        assert child["answer_mode"] == "supplement"
+        assert after["session"]["current_question"] == before["session"]["current_question"]
+        assert len(turns) == 2
+
+
 def test_answer_retry_is_idempotent_after_question_advances():
     """A replayed POST returns the committed turn instead of a 400 race."""
     with TestClient(app) as client:
@@ -108,6 +162,57 @@ def test_match_preview_does_not_create_training_session():
         assert response.json()["questions"]
         after = db._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
         assert after == before
+
+
+def test_match_score_is_stable_profile_jd_coverage_not_question_count():
+    payload = {
+        "mode": "technical",
+        "role": "后端开发工程师",
+        "job_text": "Python FastAPI PostgreSQL Redis",
+        "user_profile": {"skills": ["Python", "FastAPI"], "projects": []},
+    }
+    with TestClient(app) as client:
+        first = client.post("/api/v1/matches", json=payload)
+        second = client.post("/api/v1/matches", json=payload)
+        assert first.status_code == 200
+        assert second.status_code == 200
+        first_json = first.json()
+        second_json = second.json()
+        assert first_json["match_score"] == 50
+        assert first_json["match_score"] == second_json["match_score"]
+        assert set(first_json["required_skills"]) == {"python", "fastapi", "postgresql", "redis"}
+        assert set(first_json["profile_matched_skills"]) == {"python", "fastapi"}
+
+        # Retrieval size is unrelated to the profile/JD score.
+        assert first_json["questions"]
+        assert first_json["match_score"] != 50 + len(first_json["matched_skills"]) * 5 + min(len(first_json["questions"]), 5) * 2
+
+
+def test_match_preview_job_id_uses_owned_saved_jd_and_profile():
+    with TestClient(app) as client:
+        assert client.put(
+            "/api/v1/profile",
+            json={"skills": ["Python", "FastAPI"], "projects": []},
+        ).status_code == 200
+        saved = client.post(
+            "/api/v1/jobs",
+            json={"title": "后端岗位", "jd_text": "Python FastAPI PostgreSQL Redis"},
+        )
+        assert saved.status_code == 200
+        job_id = saved.json()["job"]["id"]
+        response = client.post(
+            "/api/v1/matches",
+            json={"mode": "technical", "role": "通用软件开发工程师", "job_id": job_id},
+        )
+        assert response.status_code == 200
+        assert response.json()["match_score"] == 50
+
+    with TestClient(app) as other_client:
+        denied = other_client.post(
+            "/api/v1/matches",
+            json={"mode": "technical", "job_id": job_id},
+        )
+        assert denied.status_code == 404
 
 
 def test_algorithm_runner_rejects_forbidden_code():
@@ -324,7 +429,7 @@ def test_registered_accounts_keep_profiles_jobs_readiness_and_sessions_isolated(
         other_overview = other.get("/api/v1/workspace/overview").json()
         assert owner_overview["user_id"] != other_overview["user_id"]
         assert owner_overview["counts"]["jobs"] == 1
-        assert owner_overview["counts"]["sessions"] == 1
+        assert owner_overview["counts"]["sessions"] == 0
         assert other_overview["counts"]["jobs"] == 0
         assert other_overview["counts"]["sessions"] == 0
         assert "postgresql" in owner_overview["readiness"]["skill_gaps"]
@@ -340,7 +445,7 @@ def test_registered_accounts_keep_profiles_jobs_readiness_and_sessions_isolated(
         )
         assert login.status_code == 200
         assert owner.get("/api/v1/profile").json()["profile"]["full_name"] == "张三"
-        assert owner.get("/api/v1/workspace/overview").json()["counts"]["sessions"] == 1
+        assert owner.get("/api/v1/workspace/overview").json()["counts"]["sessions"] == 0
 
 
 def test_readiness_starts_at_zero_until_a_target_job_exists():
@@ -396,6 +501,46 @@ def test_rag_extracts_normalized_skills_and_reports_recall():
     assert 0 <= result["recall_at_k"] <= 1
 
 
+def test_rag_semantic_dedupe_collapses_algorithm_paraphrases():
+    from app.services.rag import GraphRAGService
+
+    items = [
+        {"id": "a", "process_type": "算法面", "question": "Two Sum: return indices whose sum equals target", "skills": []},
+        {"id": "b", "process_type": "算法面", "question": "两数之和：给定数组和 target，返回两个下标（solution）", "skills": []},
+        {"id": "c", "process_type": "算法面", "question": "请反转一个单链表并分析复杂度", "skills": []},
+    ]
+    deduped = GraphRAGService._dedupe(items)
+    assert [item["id"] for item in deduped] == ["a", "c"]
+
+
+def test_rag_missing_dataset_keeps_group_simulation():
+    rag_service = GraphRAGService(Path(tempfile.mkdtemp()) / "missing.json")
+    result = rag_service.match(mode="group", role="产品经理", job_text="", profile={})
+    assert result["questions"]
+    assert result["questions"][0]["question_id"] == "Q-GROUP-001"
+
+
+def test_resume_fallback_sections_are_mapped_to_profile_fields():
+    from app.services.documents import _fallback_parse
+
+    parsed = _fallback_parse(
+        "resume",
+        "张三\n求职意向：后端开发工程师\n"
+        "教育背景\n清华大学 计算机科学\n"
+        "工作经历\n某科技公司 后端工程师 2022-2024\n"
+        "项目经历\nTechMatch 面试匹配平台\n"
+        "专业技能\nPython FastAPI PostgreSQL\n"
+        "获奖成果\n优秀员工奖",
+    )
+    profile = parsed["profile"]
+    assert profile["full_name"] == "张三"
+    assert "清华大学" in profile["education"]
+    assert "某科技公司" in profile["experience"]
+    assert profile["projects"] == ["TechMatch 面试匹配平台"]
+    assert "python" in profile["skills"]
+    assert profile["achievements"] == ["优秀员工奖"]
+
+
 def test_session_can_be_completed_and_reported():
     with TestClient(app) as client:
         started = client.post("/api/v1/sessions", json={"mode": "technical", "role": "后端工程师"})
@@ -406,6 +551,37 @@ def test_session_can_be_completed_and_reported():
         assert completed.json()["status"] == "completed"
         summary = client.get(f"/api/v1/sessions/{sid}")
         assert summary.json()["session"]["status"] == "completed"
+
+
+def test_unanswered_session_is_hidden_until_first_answer():
+    with TestClient(app) as client:
+        started = client.post("/api/v1/sessions", json={"mode": "technical", "role": "后端工程师"})
+        assert started.status_code == 200
+        empty_sid = started.json()["session_id"]
+        assert client.post(f"/api/v1/sessions/{empty_sid}/complete").status_code == 200
+        assert empty_sid not in {item["session_id"] for item in client.get("/api/v1/history").json()["items"]}
+        assert empty_sid not in {item.get("session_id") for item in client.get("/api/v1/reports").json()["reports"]}
+
+        answered = client.post("/api/v1/sessions", json={"mode": "technical", "role": "后端工程师"})
+        assert answered.status_code == 200
+        answered_payload = answered.json()
+        response = client.post(
+            f"/api/v1/sessions/{answered_payload['session_id']}/turns",
+            json={
+                "question_id": answered_payload["question_id"],
+                "answer_text": "我在项目中使用 Python 优化接口，延迟下降 20%。",
+            },
+        )
+        assert response.status_code == 200
+        assert answered_payload["session_id"] in {
+            item["session_id"] for item in client.get("/api/v1/history").json()["items"]
+        }
+        reports = client.get("/api/v1/reports").json()["reports"]
+        report = next(item for item in reports if item.get("session_id") == answered_payload["session_id"])
+        detail = client.get(f"/api/v1/reports/{report['id']}")
+        assert detail.status_code == 200
+        turns = detail.json()["report"]["turns"]
+        assert turns and turns[0]["question_text"]
 
 
 def test_candidate_document_upload_parse_confirm_and_ownership():

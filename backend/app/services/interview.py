@@ -33,6 +33,8 @@ def feedback_schema(mode: str) -> dict[str, Any]:
             "next_question": {"type": ["string", "null"]},
             "next_action": {"type": "string"},
             "source_refs": {"type": "array", "items": {"type": "string"}},
+            "group_phase": {"type": "string"},
+            "group_reaction": {"type": "object"},
         },
         "additionalProperties": True,
     }
@@ -120,7 +122,26 @@ class InterviewService:
         if not session:
             raise KeyError("session_not_found")
         question = session.get("current_question") or {}
-        if payload["question_id"] != question.get("question_id"):
+        revision_of = str(payload.get("revision_of") or "").strip() or None
+        answer_mode = str(payload.get("answer_mode") or "answer")
+        parent_turn = None
+        if revision_of:
+            parent_turn = self.db.get_turn(revision_of, session_id)
+            if not parent_turn or not parent_turn.get("feedback"):
+                raise ValueError("revision_turn_not_found")
+            if payload["question_id"] != parent_turn.get("question_id"):
+                raise ValueError("revision_question_mismatch")
+            # The current session may already point at a follow-up question;
+            # revisions stay attached to the original question and its rubric.
+            question = self.db.get_question(str(parent_turn["question_id"]), include_inactive=True) or {
+                "question_id": parent_turn["question_id"],
+                "question": parent_turn.get("question_text", ""),
+                "rubric": policy_for(session["mode"])["dimensions"],
+                "follow_ups": [],
+            }
+            question["question_id"] = question.get("question_id") or question.get("id")
+            question["question"] = parent_turn.get("question_text") or question.get("question", "")
+        elif payload["question_id"] != question.get("question_id"):
             # A client can lose the response after the server has committed a
             # turn (for example when a model call outlives a proxy timeout)
             # and then replay the same POST.  Treat an already evaluated
@@ -146,13 +167,22 @@ class InterviewService:
         turn_id = f"turn-{uuid.uuid4().hex}"
         self.db.save_turn({
             "turn_id": turn_id, "session_id": session_id, "question_id": payload["question_id"],
+            "question_text": question.get("question", ""),
             "answer_text": answer_text, "code": payload.get("code"), "language": payload.get("language", "python"),
+            "parent_turn_id": revision_of,
+            "answer_mode": answer_mode,
             "algorithm_result": algorithm_result,
         })
         rubric = question.get("rubric") or policy_for(session["mode"])["dimensions"]
+        evaluation_answer = answer_text
+        if parent_turn and parent_turn.get("answer_text"):
+            evaluation_answer = (
+                f"原回答（仅作上下文）：\n{parent_turn['answer_text']}\n\n"
+                f"本次修改/补充回答：\n{answer_text}"
+            )
         generated = await self.router.complete(
             "evaluate",
-            evaluation_prompt(session["mode"], question.get("question", ""), answer_text, session["user_profile"], rubric),
+            evaluation_prompt(session["mode"], question.get("question", ""), evaluation_answer, session["user_profile"], rubric),
             session_id,
             response_schema=feedback_schema(session["mode"]),
             max_tokens=1200,
@@ -165,7 +195,10 @@ class InterviewService:
         feedback = Feedback.model_validate(feedback).model_dump()
         self.db.save_feedback(turn_id, feedback)
 
-        next_question = self._next_question(session, question)
+        # A revision is a second pass over the same prompt. Keep the interview
+        # cursor where it was so the candidate can continue the existing
+        # follow-up flow instead of being sent backwards.
+        next_question = session.get("current_question") if revision_of else self._next_question(session, question)
         session["current_question"] = next_question
         session["status"] = "follow_up" if next_question and next_question.get("is_follow_up") else "questioning"
         self.db.save_session(session)
@@ -218,6 +251,11 @@ class InterviewService:
         session["current_question"] = None
         self.db.save_session(session)
         turns = self.db.list_turns(session_id)
+        # Opening a practice screen creates a draft session, but a session
+        # without an answer is not a training record and must not create an
+        # empty report or a zero-score entry.
+        if not turns:
+            return {"session": session, "report": None, "turn_count": 0, "status": "completed"}
         values = [
             float(value)
             for turn in turns
@@ -245,8 +283,19 @@ class InterviewService:
 
     def _next_question(self, session: dict[str, Any], question: dict[str, Any]) -> dict[str, Any] | None:
         follow_ups = question.get("follow_ups") or []
-        if follow_ups and not question.get("is_follow_up") and session["mode"] in {"stress", "behavioral", "technical", "algorithm"}:
-            return {**question, "question": follow_ups[0], "question_id": f"{question.get('question_id')}-f1", "is_follow_up": True}
+        if follow_ups and session["mode"] in {"stress", "behavioral", "technical", "algorithm", "group"}:
+            if not question.get("is_follow_up"):
+                follow_up_index = 0
+            else:
+                match = re.search(r"-f(\d+)$", str(question.get("question_id") or ""))
+                follow_up_index = int(match.group(1)) if match else 0
+            if follow_up_index < len(follow_ups):
+                return {
+                    **question,
+                    "question": follow_ups[follow_up_index],
+                    "question_id": f"{question.get('question_id').split('-f')[0]}-f{follow_up_index + 1}",
+                    "is_follow_up": True,
+                }
         matched = self.rag.match(
             mode=session["mode"], role=session["role"], job_text=session["job_text"], profile=session["user_profile"],
         )
@@ -271,7 +320,7 @@ class InterviewService:
             for dimension in dims:
                 if dimension in {"algorithm", "code_quality", "correctness"}:
                     scores[dimension] = 5.0
-        return {
+        result = {
             "scores": scores,
             "evidence_quotes": [quote],
             "strengths": ["回答包含可进一步展开的具体信息。" if answer else ""],
@@ -281,3 +330,16 @@ class InterviewService:
             "next_action": "建议根据反馈重新回答一次，再进入下一题。",
             "source_refs": [],
         }
+        if mode == "group":
+            result.update(
+                {
+                    "group_phase": "观点陈述",
+                    "group_reaction": {
+                        "speaker": "模拟队友 A",
+                        "role": "推进者",
+                        "message": "我同意先统一目标，但建议把资源约束量化后再比较方案。",
+                        "prompt": "请回应队友并推动小组形成一个可执行的判断标准。",
+                    },
+                }
+            )
+        return result

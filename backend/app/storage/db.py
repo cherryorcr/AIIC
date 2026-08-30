@@ -222,9 +222,12 @@ class Database:
                     id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL,
                     question_id TEXT NOT NULL,
+                    question_text TEXT NOT NULL DEFAULT '',
                     answer_text TEXT NOT NULL,
                     code TEXT,
                     language TEXT,
+                    parent_turn_id TEXT,
+                    answer_mode TEXT NOT NULL DEFAULT 'answer',
                     algorithm_result_json TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(session_id) REFERENCES sessions(id)
@@ -412,6 +415,9 @@ class Database:
             self._ensure_column(self._conn, "questions", "is_active", "INTEGER NOT NULL DEFAULT 1")
             self._ensure_column(self._conn, "sessions", "user_id", "TEXT")
             self._ensure_column(self._conn, "sessions", "job_id", "TEXT")
+            self._ensure_column(self._conn, "turns", "question_text", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(self._conn, "turns", "parent_turn_id", "TEXT")
+            self._ensure_column(self._conn, "turns", "answer_mode", "TEXT NOT NULL DEFAULT 'answer'")
             self._ensure_column(self._conn, "users", "display_name", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, "users", "email", "TEXT")
             self._ensure_column(self._conn, "users", "password_hash", "TEXT")
@@ -1201,9 +1207,16 @@ class Database:
             if user_id:
                 where = " WHERE user_id = ?"
                 params.append(user_id)
-            params.append(max(1, min(int(limit), 500)))
             rows = self._conn.execute(
-                f"SELECT * FROM reports{where} ORDER BY created_at DESC LIMIT ?", params
+                f"""
+                SELECT * FROM reports{where}
+                {"AND" if where else "WHERE"}
+                (session_id IS NULL OR EXISTS (
+                    SELECT 1 FROM turns WHERE turns.session_id = reports.session_id
+                ))
+                ORDER BY created_at DESC LIMIT ?
+                """,
+                [*params, max(1, min(int(limit), 500))],
             ).fetchall()
             result = []
             for row in rows:
@@ -1219,7 +1232,12 @@ class Database:
         sessions = []
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?",
+                """
+                SELECT * FROM sessions
+                WHERE user_id = ?
+                  AND EXISTS (SELECT 1 FROM turns WHERE turns.session_id = sessions.id)
+                ORDER BY updated_at DESC LIMIT ?
+                """,
                 (user_id, max(1, min(int(limit), 500))),
             ).fetchall()
             for row in rows:
@@ -1255,20 +1273,25 @@ class Database:
             self._conn.execute(
                 """
                 INSERT INTO turns
-                (id, session_id, question_id, answer_text, code, language, algorithm_result_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (id, session_id, question_id, question_text, answer_text, code, language, parent_turn_id, answer_mode, algorithm_result_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     session_id=excluded.session_id, question_id=excluded.question_id,
+                    question_text=excluded.question_text,
                     answer_text=excluded.answer_text, code=excluded.code, language=excluded.language,
+                    parent_turn_id=excluded.parent_turn_id, answer_mode=excluded.answer_mode,
                     algorithm_result_json=excluded.algorithm_result_json, created_at=excluded.created_at
                 """,
                 (
                     payload["turn_id"],
                     payload["session_id"],
                     payload["question_id"],
+                    payload.get("question_text", ""),
                     payload.get("answer_text", ""),
                     payload.get("code"),
                     payload.get("language"),
+                    payload.get("parent_turn_id"),
+                    payload.get("answer_mode", "answer"),
                     json.dumps(payload.get("algorithm_result"), ensure_ascii=False),
                     payload.get("created_at", utc_now()),
                 ),
@@ -1313,6 +1336,25 @@ class Database:
                 "ORDER BY created_at DESC LIMIT 1",
                 (session_id, question_id),
             ).fetchone()
+            if row is None:
+                return None
+            item = dict(row)
+            item["algorithm_result"] = decode_json(item.pop("algorithm_result_json"), None)
+            feedback = self._conn.execute(
+                "SELECT payload_json FROM feedback WHERE turn_id = ?", (item["id"],)
+            ).fetchone()
+            item["feedback"] = decode_json(feedback[0], {}) if feedback else None
+            return item
+
+    def get_turn(self, turn_id: str, session_id: str | None = None) -> dict[str, Any] | None:
+        """Return one persisted answer, optionally constrained to its session."""
+        with self._lock:
+            if session_id:
+                row = self._conn.execute(
+                    "SELECT * FROM turns WHERE id = ? AND session_id = ?", (turn_id, session_id)
+                ).fetchone()
+            else:
+                row = self._conn.execute("SELECT * FROM turns WHERE id = ?", (turn_id,)).fetchone()
             if row is None:
                 return None
             item = dict(row)

@@ -1,14 +1,6 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
-import {
-  BrowserRouter,
-  NavLink,
-  Route,
-  Routes,
-  useLocation,
-  useNavigate,
-  useSearchParams,
-} from "react-router-dom";
+import { BrowserRouter, NavLink, Route, Routes, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import type { LucideIcon } from "lucide-react";
 import {
   healthCheck,
@@ -39,19 +31,7 @@ import {
   toggleFavorite,
   uploadDocument,
 } from "./api";
-import type {
-  AlgorithmResult,
-  AuthState,
-  BackendQuestion,
-  CandidateDocument,
-  DocumentKind,
-  Feedback as BackendFeedback,
-  MatchResponse,
-  SessionSummary,
-  StartSessionResponse,
-  UserProfile,
-  WorkspaceOverview,
-} from "./api";
+import type { AlgorithmResult, AuthState, BackendQuestion, CandidateDocument, DocumentKind, Feedback as BackendFeedback, MatchResponse, SessionSummary, StartSessionResponse, UserProfile, WorkspaceOverview } from "./api";
 import {
   AlertCircle,
   ArrowRight,
@@ -60,6 +40,7 @@ import {
   BookOpen,
   BrainCircuit,
   BriefcaseBusiness,
+  ArrowLeftRight,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -97,11 +78,12 @@ import {
   TimerReset,
   Trash2,
   UploadCloud,
+  Users,
   UserRound,
   X,
 } from "lucide-react";
 
-type ModeId = "technical" | "algorithm" | "behavioral" | "stress" | "case" | "research" | "hr";
+type ModeId = "technical" | "algorithm" | "behavioral" | "stress" | "case" | "research" | "hr" | "group";
 
 type ModeMeta = {
   id: ModeId;
@@ -198,6 +180,15 @@ const modeMeta: ModeMeta[] = [
     helper: "让回答具体、真实、不过度包装",
     Icon: BriefcaseBusiness,
     color: "slate",
+  },
+  {
+    id: "group",
+    label: "群面",
+    shortLabel: "群面",
+    description: "围绕一个开放问题协作、质疑并达成共识",
+    helper: "AI 模拟主持人和队友，按阶段推进讨论",
+    Icon: Users,
+    color: "indigo",
   },
 ];
 
@@ -353,24 +344,17 @@ function AppShell({ auth, onAuthChange }: { auth: AuthState; onAuthChange: (valu
   const navigate = useNavigate();
   const title = getPageTitle(location.pathname);
   const displayName = auth.user.display_name || (auth.authenticated ? auth.user.email : "临时用户");
-  const avatar = String(displayName || "U").trim().slice(0, 1).toUpperCase();
+  const avatar = String(displayName || "U")
+    .trim()
+    .slice(0, 1)
+    .toUpperCase();
 
   return (
     <div className={collapsed ? "app-shell app-shell-collapsed" : "app-shell"}>
-      <Sidebar
-        collapsed={collapsed}
-        mobileOpen={mobileOpen}
-        onClose={() => setMobileOpen(false)}
-        onToggle={() => setCollapsed((value) => !value)}
-      />
+      <Sidebar collapsed={collapsed} mobileOpen={mobileOpen} onClose={() => setMobileOpen(false)} onToggle={() => setCollapsed((value) => !value)} />
       <div className="app-main">
         <header className="topbar">
-          <button
-            className="icon-button mobile-menu"
-            type="button"
-            aria-label="打开导航"
-            onClick={() => setMobileOpen(true)}
-          >
+          <button className="icon-button mobile-menu" type="button" aria-label="打开导航" onClick={() => setMobileOpen(true)}>
             <Menu size={19} />
           </button>
           <div className="topbar-heading">
@@ -410,31 +394,12 @@ function AppShell({ auth, onAuthChange }: { auth: AuthState; onAuthChange: (valu
   );
 }
 
-function Sidebar({
-  collapsed,
-  mobileOpen,
-  onClose,
-  onToggle,
-}: {
-  collapsed: boolean;
-  mobileOpen: boolean;
-  onClose: () => void;
-  onToggle: () => void;
-}) {
+function Sidebar({ collapsed, mobileOpen, onClose, onToggle }: { collapsed: boolean; mobileOpen: boolean; onClose: () => void; onToggle: () => void }) {
   const navigate = useNavigate();
   return (
     <>
-      {mobileOpen ? (
-        <button
-          className="sidebar-backdrop"
-          aria-label="关闭导航"
-          type="button"
-          onClick={onClose}
-        />
-      ) : null}
-      <aside
-        className={`sidebar ${collapsed ? "sidebar-collapsed" : ""} ${mobileOpen ? "sidebar-mobile-open" : ""}`}
-      >
+      {mobileOpen ? <button className="sidebar-backdrop" aria-label="关闭导航" type="button" onClick={onClose} /> : null}
+      <aside className={`sidebar ${collapsed ? "sidebar-collapsed" : ""} ${mobileOpen ? "sidebar-mobile-open" : ""}`}>
         <div className="brand-row">
           <NavLink className="brand" to="/" onClick={onClose}>
             <span className="brand-mark">
@@ -445,20 +410,10 @@ function Sidebar({
               <small>AI 面试陪练</small>
             </span>
           </NavLink>
-          <button
-            className="icon-button sidebar-close"
-            type="button"
-            aria-label="关闭导航"
-            onClick={onClose}
-          >
+          <button className="icon-button sidebar-close" type="button" aria-label="关闭导航" onClick={onClose}>
             <X size={17} />
           </button>
-          <button
-            className="icon-button sidebar-collapse"
-            type="button"
-            aria-label={collapsed ? "展开侧栏" : "收起侧栏"}
-            onClick={onToggle}
-          >
+          <button className="icon-button sidebar-collapse" type="button" aria-label={collapsed ? "展开侧栏" : "收起侧栏"} onClick={onToggle}>
             {collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
           </button>
         </div>
@@ -476,24 +431,14 @@ function Sidebar({
         <nav className="side-nav" aria-label="主导航">
           <span className="nav-label">工作台</span>
           {navItems.map(({ label, path, Icon, end }) => (
-            <NavLink
-              key={path}
-              className={({ isActive }) => (isActive ? "side-link active" : "side-link")}
-              end={end}
-              to={path}
-              onClick={onClose}
-            >
+            <NavLink key={path} className={({ isActive }) => (isActive ? "side-link active" : "side-link")} end={end} to={path} onClick={onClose}>
               <Icon size={18} />
               <span>{label}</span>
               {label === "岗位匹配" ? <em>3</em> : null}
             </NavLink>
           ))}
           <span className="nav-label nav-label-spaced">管理</span>
-          <NavLink
-            className={({ isActive }) => (isActive ? "side-link active" : "side-link")}
-            to="/settings"
-            onClick={onClose}
-          >
+          <NavLink className={({ isActive }) => (isActive ? "side-link active" : "side-link")} to="/settings" onClick={onClose}>
             <Settings2 size={18} />
             <span>系统设置</span>
           </NavLink>
@@ -520,17 +465,7 @@ function Sidebar({
 
 function CpuIcon() {
   return (
-    <svg
-      viewBox="0 0 24 24"
-      width="17"
-      height="17"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
+    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <rect x="5" y="5" width="14" height="14" rx="2" />
       <path d="M9 9h6v6H9zM9 1v4M15 1v4M9 19v4M15 19v4M19 9h4M19 14h4M1 9h4M1 14h4" />
     </svg>
@@ -567,9 +502,24 @@ function DashboardPage() {
         color: ["blue", "mint", "coral"][index],
       }))
     : [
-        { title: "完善目标 JD", detail: "保存岗位描述后生成技能缺口。", progress: readiness?.profile_completeness ?? 0, color: "blue" },
-        { title: "补充项目证据", detail: "写清个人贡献、数据结果和复盘。", progress: readiness?.training_score ?? 0, color: "mint" },
-        { title: "开始场景训练", detail: "完成回答后更新个性化准备度。", progress: Math.min(100, (overview?.counts.sessions ?? 0) * 20), color: "coral" },
+        {
+          title: "完善目标 JD",
+          detail: "保存岗位描述后生成技能缺口。",
+          progress: readiness?.profile_completeness ?? 0,
+          color: "blue",
+        },
+        {
+          title: "补充项目证据",
+          detail: "写清个人贡献、数据结果和复盘。",
+          progress: readiness?.training_score ?? 0,
+          color: "mint",
+        },
+        {
+          title: "开始场景训练",
+          detail: "完成回答后更新个性化准备度。",
+          progress: Math.min(100, (overview?.counts.sessions ?? 0) * 20),
+          color: "coral",
+        },
       ];
   return (
     <div className="dashboard-page">
@@ -596,7 +546,12 @@ function DashboardPage() {
             </button>
           </div>
           <div className="readiness-body">
-            <div className="score-ring" style={{ background: `conic-gradient(var(--blue) 0 ${score}%, #e8edf5 ${score}% 100%)` }}>
+            <div
+              className="score-ring"
+              style={{
+                background: `conic-gradient(var(--blue) 0 ${score}%, #e8edf5 ${score}% 100%)`,
+              }}
+            >
               <span>{score}</span>
               <small>/100</small>
             </div>
@@ -644,11 +599,7 @@ function DashboardPage() {
               <span>{latestSession?.date || "完成一次训练后可从这里继续复盘"}</span>
             </div>
           </div>
-          <button
-            className="secondary-button full-button"
-            type="button"
-            onClick={() => navigate("/practice")}
-          >
+          <button className="secondary-button full-button" type="button" onClick={() => navigate("/practice")}>
             继续训练 <ArrowRight size={16} />
           </button>
         </article>
@@ -682,7 +633,12 @@ function DashboardPage() {
             {dashboardSessions.map((session) => (
               <SessionRow key={session.title} session={session} />
             ))}
-            {!dashboardSessions.length ? <div className="empty-list"><Clock3 size={20} /><p>当前账户暂无训练记录。</p></div> : null}
+            {!dashboardSessions.length ? (
+              <div className="empty-list">
+                <Clock3 size={20} />
+                <p>当前账户暂无训练记录。</p>
+              </div>
+            ) : null}
           </div>
         </div>
         <aside className="right-column">
@@ -727,19 +683,7 @@ function ModeCard({ mode, onClick }: { mode: ModeMeta; onClick: () => void }) {
   );
 }
 
-function RecommendationItem({
-  icon,
-  title,
-  detail,
-  progress,
-  color,
-}: {
-  icon: ReactNode;
-  title: string;
-  detail: string;
-  progress: number;
-  color: string;
-}) {
+function RecommendationItem({ icon, title, detail, progress, color }: { icon: ReactNode; title: string; detail: string; progress: number; color: string }) {
   return (
     <div className="recommendation-item">
       <div className={`recommendation-icon icon-${color}`}>{icon}</div>
@@ -779,11 +723,7 @@ function SessionRow({ session }: { session: DashboardSession }) {
   );
 }
 
-function backendQuestionToQuestion(
-  item: BackendQuestion,
-  mode: ModeId,
-  fallback?: Question,
-): Question {
+function backendQuestionToQuestion(item: BackendQuestion, mode: ModeId, fallback?: Question): Question {
   const prompt = item.question || fallback?.prompt || "请介绍一个与目标岗位相关的项目。";
   return {
     id: item.question_id,
@@ -792,9 +732,7 @@ function backendQuestionToQuestion(
     prompt,
     skills: item.skills?.length ? item.skills : fallback?.skills || [],
     difficulty: item.difficulty || fallback?.difficulty || "中",
-    source: item.source_refs?.length
-      ? item.source_refs.join(" · ")
-      : fallback?.source || "synthetic_mock",
+    source: item.source_refs?.length ? item.source_refs.join(" · ") : fallback?.source || "synthetic_mock",
     sourceUrl: typeof item.source?.url === "string" ? item.source.url : fallback?.sourceUrl,
     sourceLicense: typeof item.source?.license === "string" ? item.source.license : fallback?.sourceLicense,
     sourceConfidence: item.source_confidence || fallback?.sourceConfidence,
@@ -816,29 +754,19 @@ function modeFromProcessType(value?: string): ModeId {
     科研面: "research",
     HR面: "hr",
     "HR 面": "hr",
+    群面: "group",
   };
-  return (
-    map[value || ""] ||
-    (modeMeta.some((item) => item.id === value) ? (value as ModeId) : "technical")
-  );
+  return map[value || ""] || (modeMeta.some((item) => item.id === value) ? (value as ModeId) : "technical");
 }
 
 function questionFromKnowledge(item: BackendQuestion): Question {
   const mode = modeFromProcessType(item.process_type);
-  const fallback =
-    questions.find(
-      (candidate) => candidate.id === (item.id || item.question_id) && candidate.mode === mode,
-    ) ||
-    questions.find((candidate) => candidate.mode === mode);
+  const fallback = questions.find((candidate) => candidate.id === (item.id || item.question_id) && candidate.mode === mode) || questions.find((candidate) => candidate.mode === mode);
   return backendQuestionToQuestion(
     {
       ...item,
       question_id: item.question_id || item.id || `Q-${Date.now()}`,
-      source_refs:
-        item.source_refs ||
-        (item.source
-          ? [String(item.source.title || item.source.url || item.source.type || "数据库题库")]
-          : []),
+      source_refs: item.source_refs || (item.source ? [String(item.source.title || item.source.url || item.source.type || "数据库题库")] : []),
     },
     mode,
     fallback,
@@ -855,9 +783,7 @@ function questionFromStart(
   },
   mode: ModeId,
 ): Question {
-  const fallback =
-    questions.find((item) => item.id === start.question_id && item.mode === mode) ||
-    questions.find((item) => item.mode === mode);
+  const fallback = questions.find((item) => item.id === start.question_id && item.mode === mode) || questions.find((item) => item.mode === mode);
   return backendQuestionToQuestion(
     {
       question_id: start.question_id,
@@ -878,11 +804,15 @@ function PracticePage() {
   const [question, setQuestion] = useState<Question>(questions[0]);
   const [nextQuestionData, setNextQuestionData] = useState<Question | null>(null);
   const [sessionCompleted, setSessionCompleted] = useState(false);
+  const [sessionNotice, setSessionNotice] = useState("");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [answer, setAnswer] = useState("");
   const [submitted, setSubmitted] = useState(false);
+  const [panelsSwapped, setPanelsSwapped] = useState(false);
   const [algorithmSubmitted, setAlgorithmSubmitted] = useState(false);
   const [feedback, setFeedback] = useState<BackendFeedback | null>(null);
+  const [lastTurnId, setLastTurnId] = useState<string | null>(null);
+  const [revisionOf, setRevisionOf] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [runResult, setRunResult] = useState<AlgorithmResult | null>(null);
   const [code, setCode] = useState(
@@ -901,10 +831,14 @@ function PracticePage() {
     setLoading(true);
     setError("");
     setSubmitted(false);
+    setPanelsSwapped(false);
     setAlgorithmSubmitted(false);
     setFeedback(null);
+    setLastTurnId(null);
+    setRevisionOf(null);
     setNextQuestionData(null);
     setSessionCompleted(false);
+    setSessionNotice("");
     setAnswer("");
     setRunResult(null);
     const fallback = questions.find((item) => item.mode === activeMode) || questions[0];
@@ -921,9 +855,7 @@ function PracticePage() {
           job_id: requestedJobId,
           job_text: savedProfile.job_text || "Python FastAPI PostgreSQL Redis Docker 系统设计",
           user_profile: {
-            skills: savedProfile.skills.length
-              ? savedProfile.skills
-              : ["Python", "FastAPI", "PostgreSQL"],
+            skills: savedProfile.skills.length ? savedProfile.skills : ["Python", "FastAPI", "PostgreSQL"],
             projects: savedProfile.projects.length ? savedProfile.projects : ["TechMatch"],
           },
           difficulty: "medium",
@@ -934,26 +866,18 @@ function PracticePage() {
         const data = sessionResult.value;
         const persisted = (data as SessionSummary).session || data;
         setSessionId(String(persisted.session_id || data.session_id));
-        const sessionMode = requestedSession
-          ? (persisted.mode as ModeId) || activeMode
-          : activeMode;
+        const sessionMode = requestedSession ? (persisted.mode as ModeId) || activeMode : activeMode;
         if (requestedSession && sessionMode !== activeMode) {
           setActiveMode(sessionMode as ModeId);
         }
-        const current = (persisted as SessionSummary).current_question as
-          BackendQuestion | null | undefined;
-        setQuestion(
-          current
-            ? backendQuestionToQuestion(current, sessionMode as ModeId, fallback)
-            : questionFromStart(data as StartSessionResponse, sessionMode as ModeId),
-        );
+        const current = (persisted as SessionSummary).current_question as BackendQuestion | null | undefined;
+        setQuestion(current ? backendQuestionToQuestion(current, sessionMode as ModeId, fallback) : questionFromStart(data as StartSessionResponse, sessionMode as ModeId));
         setQuestionIndex(0);
       } else {
         setSessionId(null);
         setError("后端暂不可用，当前显示演示题；启动 FastAPI 后会自动联调。");
       }
-      if (healthResult.status === "fulfilled")
-        setModelOnline(Boolean(healthResult.value.status === "ok"));
+      if (healthResult.status === "fulfilled") setModelOnline(Boolean(healthResult.value.status === "ok"));
       else setModelOnline(false);
       setLoading(false);
     });
@@ -973,8 +897,14 @@ function PracticePage() {
     setCompleting(true);
     setError("");
     try {
-      await completeSession(sessionId);
-      setSessionCompleted(true);
+      const result = await completeSession(sessionId);
+      if (result.turn_count === 0) {
+        setSessionCompleted(false);
+        setSessionNotice("本次没有提交回答，未生成训练记录或报告。下次提交至少一轮回答后再结束训练即可。");
+      } else {
+        setSessionCompleted(true);
+        setSessionNotice("");
+      }
       setNextQuestionData(null);
     } catch {
       setError("结束训练失败，请稍后重试。");
@@ -992,10 +922,21 @@ function PracticePage() {
     setNextQuestionData(null);
     setQuestionIndex((index) => index + 1);
     setSubmitted(false);
+    setPanelsSwapped(false);
     setAlgorithmSubmitted(false);
     setFeedback(null);
     setRunResult(null);
     setAnswer("");
+  }
+  function supplementAnswer() {
+    if (!lastTurnId || !answer.trim()) return;
+    setRevisionOf(lastTurnId);
+    setSubmitted(false);
+    setPanelsSwapped(false);
+    setFeedback(null);
+    setNextQuestionData(null);
+    setError("");
+    setAnswer((current) => `${current.trim()}\n\n补充回答：`);
   }
   async function submitAnswer() {
     if (answer.trim().length < 8 || !sessionId || submitting) return;
@@ -1005,14 +946,14 @@ function PracticePage() {
       const result = await submitTurn(sessionId, {
         question_id: question.id,
         answer_text: answer,
+        revision_of: revisionOf || undefined,
+        answer_mode: revisionOf ? "supplement" : "answer",
       });
       setFeedback(result.feedback);
       setSubmitted(true);
-      setNextQuestionData(
-        result.next_question
-          ? backendQuestionToQuestion(result.next_question, activeMode, question)
-          : null,
-      );
+      setLastTurnId(result.turn_id);
+      setRevisionOf(null);
+      setNextQuestionData(result.next_question ? backendQuestionToQuestion(result.next_question, activeMode, question) : null);
       if (!result.next_question) setSessionCompleted(false);
     } catch (cause) {
       // If the browser lost the response after the server committed the turn,
@@ -1021,16 +962,14 @@ function PracticePage() {
       // answer again and hitting question_id_not_current.
       try {
         const persisted = await getSessionSummary(sessionId);
-        const persistedTurn = (persisted.turns || []).find(
-          (item) => String(item.question_id || "") === question.id && item.feedback,
-        );
+        const persistedTurn = [...(persisted.turns || [])].reverse().find((item) => String(item.question_id || "") === question.id && item.feedback);
         if (persistedTurn?.feedback) {
           setFeedback(persistedTurn.feedback as BackendFeedback);
           setSubmitted(true);
+          setLastTurnId(String(persistedTurn.id || ""));
+          setRevisionOf(null);
           const current = persisted.current_question as BackendQuestion | null | undefined;
-          setNextQuestionData(
-            current ? backendQuestionToQuestion(current, activeMode, question) : null,
-          );
+          setNextQuestionData(current ? backendQuestionToQuestion(current, activeMode, question) : null);
           setError("");
           return;
         }
@@ -1067,9 +1006,7 @@ function PracticePage() {
           tests: question.tests || [],
         });
         setAlgorithmSubmitted(true);
-        setNextQuestionData(
-          turn.next_question ? backendQuestionToQuestion(turn.next_question, activeMode, question) : null,
-        );
+        setNextQuestionData(turn.next_question ? backendQuestionToQuestion(turn.next_question, activeMode, question) : null);
       }
     } catch {
       setError("判题服务不可用，请确认后端和算法沙箱已启动。");
@@ -1096,8 +1033,11 @@ function PracticePage() {
             type="button"
             aria-label="重置当前训练"
             onClick={() => {
-              setSubmitted(false);
-              setFeedback(null);
+    setSubmitted(false);
+    setLastTurnId(null);
+    setRevisionOf(null);
+              setPanelsSwapped(false);
+    setFeedback(null);
               setAnswer("");
               setRunResult(null);
               setError("");
@@ -1116,17 +1056,29 @@ function PracticePage() {
           </div>
         </div>
       ) : null}
-      {sessionCompleted ? <div className="source-note" role="status"><CheckCircle2 size={16} /><div><strong>本次训练已完成</strong><p>报告已保存到训练历史，可以继续选择其他场景。</p></div></div> : null}
+      {sessionCompleted ? (
+        <div className="source-note" role="status">
+          <CheckCircle2 size={16} />
+          <div>
+            <strong>本次训练已完成</strong>
+            <p>报告已保存到训练历史，可以继续选择其他场景。</p>
+          </div>
+        </div>
+      ) : null}
+      {sessionNotice ? (
+        <div className="source-note" role="status">
+          <CircleHelp size={16} />
+          <div>
+            <strong>未生成训练记录</strong>
+            <p>{sessionNotice}</p>
+          </div>
+        </div>
+      ) : null}
       <section className="mode-switcher">
         {modeMeta.map((item) => {
           const ItemIcon = item.Icon;
           return (
-            <button
-              key={item.id}
-              type="button"
-              className={activeMode === item.id ? `mode-tab active tab-${item.color}` : "mode-tab"}
-              onClick={() => changeMode(item.id)}
-            >
+            <button key={item.id} type="button" className={activeMode === item.id ? `mode-tab active tab-${item.color}` : "mode-tab"} onClick={() => changeMode(item.id)}>
               <ItemIcon size={16} />
               <span>{item.shortLabel}</span>
             </button>
@@ -1142,10 +1094,7 @@ function PracticePage() {
           <span className="meta-divider" />
           <span>第 {questionIndex + 1} 题</span>
           <span className="meta-divider" />
-          <span>
-            建议用时{" "}
-            {activeMode === "stress" ? "30 秒" : activeMode === "algorithm" ? "20 分钟" : "5 分钟"}
-          </span>
+          <span>建议用时 {activeMode === "stress" ? "30 秒" : activeMode === "algorithm" ? "20 分钟" : "5 分钟"}</span>
         </div>
         <div className="progress-meta">
           <span>训练进度</span>
@@ -1155,9 +1104,16 @@ function PracticePage() {
           <strong>{Math.min(22 + questionIndex * 12, 92)}%</strong>
         </div>
       </section>
-      <div
-        className={activeMode === "algorithm" ? "practice-grid algorithm-grid" : "practice-grid"}
-      >
+      {activeMode !== "algorithm" && submitted ? (
+        <div className="panel-layout-toolbar">
+          <span>反馈已生成，可调整面板顺序</span>
+          <button className="secondary-button panel-swap-button" type="button" onClick={() => setPanelsSwapped((swapped) => !swapped)} aria-pressed={panelsSwapped} title={panelsSwapped ? "恢复问题在左、反馈在右" : "交换问题和反馈面板"}>
+            <ArrowLeftRight size={15} />
+            {panelsSwapped ? "恢复默认顺序" : "交换面板"}
+          </button>
+        </div>
+      ) : null}
+      <div className={`${activeMode === "algorithm" ? "practice-grid algorithm-grid" : "practice-grid"}${panelsSwapped ? " panels-swapped" : ""}`}>
         <div className="question-panel">
           <div className="question-panel-head">
             <div>
@@ -1187,30 +1143,32 @@ function PracticePage() {
           {activeMode !== "algorithm" ? (
             <>
               <label className="answer-label" htmlFor="answer">
-                你的回答 <span>{answer.length} 字</span>
+                <span className="answer-label-title">{revisionOf ? "正在修改上一轮回答" : "你的回答"}</span>
+                <span>{answer.length} 字</span>
               </label>
-              <textarea
-                id="answer"
-                className="answer-input"
-                value={answer}
-                onChange={(event) => setAnswer(event.target.value)}
-                placeholder={
-                  activeMode === "stress"
-                    ? "先说结论，再给一个事实。注意控制在 30 秒内..."
-                    : "把你的思路写下来，系统会按当前场景的评分标准给出反馈..."
-                }
-              />
+              {revisionOf ? (
+                <div className="revision-notice" role="status">
+                  <RotateCcw size={14} />
+                  <span>当前正在修改上一轮回答，提交后会保留原回答并生成新的反馈。</span>
+                  <button
+                    className="text-button"
+                    type="button"
+                    onClick={() => {
+                      setRevisionOf(null);
+                      setAnswer("");
+                    }}
+                  >
+                    取消修改
+                  </button>
+                </div>
+              ) : null}
+              <textarea id="answer" className="answer-input" value={answer} onChange={(event) => setAnswer(event.target.value)} placeholder={activeMode === "stress" ? "先说结论，再给一个事实。注意控制在 30 秒内..." : "把你的思路写下来，系统会按当前场景的评分标准给出反馈..."} />
               <div className="answer-actions">
                 <span>
                   <CircleHelp size={15} />
                   不确定时可以先写要点，提交后再看追问。
                 </span>
-                <button
-                  className="primary-button"
-                  type="button"
-                  disabled={answer.trim().length < 8 || !sessionId || submitting || submitted}
-                  onClick={submitAnswer}
-                >
+                <button className="primary-button" type="button" disabled={answer.trim().length < 8 || !sessionId || submitting || submitted} onClick={submitAnswer}>
                   {submitting ? (
                     <>
                       <Gauge size={16} className="spin" />
@@ -1236,12 +1194,7 @@ function PracticePage() {
                 <button className="secondary-button" type="button" onClick={() => nextQuestion(false)}>
                   换一道题 <ArrowRight size={15} />
                 </button>
-                <button
-                  className="primary-button"
-                  type="button"
-                  onClick={() => void finishSession()}
-                  disabled={!sessionId || completing}
-                >
+                <button className="primary-button" type="button" onClick={() => void finishSession()} disabled={!sessionId || completing}>
                   {completing ? "保存报告中..." : "完成训练"}
                   <CheckCircle2 size={15} />
                 </button>
@@ -1250,13 +1203,7 @@ function PracticePage() {
           ) : null}
         </div>
         {activeMode === "algorithm" ? (
-          <CodeEditor
-            code={code}
-            setCode={setCode}
-            running={running}
-            runResult={runResult}
-            onRun={runCode}
-          />
+          <CodeEditor code={code} setCode={setCode} running={running} runResult={runResult} onRun={runCode} />
         ) : (
           <FeedbackPanel
             submitted={submitted}
@@ -1264,9 +1211,16 @@ function PracticePage() {
             question={question}
             onRetry={() => {
               setSubmitted(false);
+              setPanelsSwapped(false);
               setFeedback(null);
-              setAnswer("");
+              if (lastTurnId) {
+                setRevisionOf(lastTurnId);
+              } else {
+                setRevisionOf(null);
+                setAnswer("");
+              }
             }}
+            onSupplement={lastTurnId ? supplementAnswer : undefined}
             onNext={nextQuestion}
           />
         )}
@@ -1275,19 +1229,7 @@ function PracticePage() {
   );
 }
 
-function CodeEditor({
-  code,
-  setCode,
-  running,
-  runResult,
-  onRun,
-}: {
-  code: string;
-  setCode: (value: string) => void;
-  running: boolean;
-  runResult: AlgorithmResult | null;
-  onRun: () => void;
-}) {
+function CodeEditor({ code, setCode, running, runResult, onRun }: { code: string; setCode: (value: string) => void; running: boolean; runResult: AlgorithmResult | null; onRun: () => void }) {
   const status = runResult?.status;
   return (
     <aside className="code-panel">
@@ -1307,20 +1249,14 @@ function CodeEditor({
             <span key={index}>{index + 1}</span>
           ))}
         </div>
-        <textarea
-          aria-label="算法题代码"
-          spellCheck={false}
-          value={code}
-          onChange={(event) => setCode(event.target.value)}
-        />
+        <textarea aria-label="算法题代码" spellCheck={false} value={code} onChange={(event) => setCode(event.target.value)} />
       </div>
       <div className="test-status">
         {status === "passed" ? (
           <>
             <CheckCircle2 size={16} className="success-icon" />
             <span>
-              {runResult?.passed} / {runResult?.total} 测试用例通过 ·{" "}
-              {Math.round(runResult?.runtime_ms || 0)}ms
+              {runResult?.passed} / {runResult?.total} 测试用例通过 · {Math.round(runResult?.runtime_ms || 0)}ms
             </span>
           </>
         ) : status === "failed" ? (
@@ -1347,12 +1283,7 @@ function CodeEditor({
           </>
         )}
       </div>
-      <button
-        className="primary-button full-button"
-        type="button"
-        onClick={onRun}
-        disabled={running}
-      >
+      <button className="primary-button full-button" type="button" onClick={onRun} disabled={running}>
         {running ? (
           <>
             <Gauge size={16} className="spin" />
@@ -1395,28 +1326,15 @@ const scoreLabel: Record<string, string> = {
   fit: "岗位匹配",
   communication: "沟通",
   authenticity: "真实性",
+  problem_framing: "问题框定",
+  collaboration: "协作表达",
+  consensus: "共识推动",
+  time_management: "时间管理",
 };
 
-function FeedbackPanel({
-  submitted,
-  feedback,
-  question,
-  onRetry,
-  onNext,
-}: {
-  submitted: boolean;
-  feedback: BackendFeedback | null;
-  question: Question;
-  onRetry: () => void;
-  onNext: () => void;
-}) {
+function FeedbackPanel({ submitted, feedback, question, onRetry, onSupplement, onNext }: { submitted: boolean; feedback: BackendFeedback | null; question: Question; onRetry: () => void; onSupplement?: () => void; onNext: () => void }) {
   const scoreEntries = feedback ? Object.entries(feedback.scores) : [];
-  const average = scoreEntries.length
-    ? Math.round(
-        (scoreEntries.reduce((sum, [, value]) => sum + Number(value), 0) / scoreEntries.length) *
-          20,
-      )
-    : 0;
+  const average = scoreEntries.length ? Math.round((scoreEntries.reduce((sum, [, value]) => sum + Number(value), 0) / scoreEntries.length) * 20) : 0;
   return (
     <aside className={`feedback-panel ${submitted ? "feedback-visible" : ""}`}>
       <div className="feedback-head">
@@ -1439,12 +1357,7 @@ function FeedbackPanel({
         <>
           <div className="score-bars">
             {scoreEntries.map(([key, value], index) => (
-              <ScoreBar
-                key={key}
-                label={scoreLabel[key] || key}
-                score={Math.round(Number(value) * 20)}
-                color={["blue", "mint", "purple", "coral"][index % 4]}
-              />
+              <ScoreBar key={key} label={scoreLabel[key] || key} score={Math.round(Number(value) * 20)} color={["blue", "mint", "purple", "coral"][index % 4]} />
             ))}
           </div>
           <div className="feedback-section">
@@ -1475,10 +1388,26 @@ function FeedbackPanel({
               <strong>{feedback.next_question || question.followUp}</strong>
             </div>
           ) : null}
+          {feedback.group_reaction ? (
+            <div className="group-reaction-card">
+              <div className="group-reaction-head">
+                <span>模拟队友发言{feedback.group_phase ? ` · ${feedback.group_phase}` : ""}</span>
+                <strong>{feedback.group_reaction.speaker || "模拟队友"}</strong>
+              </div>
+              {feedback.group_reaction.role ? <small>{feedback.group_reaction.role}</small> : null}
+              <p>{feedback.group_reaction.message || "请回应队友观点并推动小组形成共识。"}</p>
+              {feedback.group_reaction.prompt ? <strong className="group-reaction-prompt">下一步：{feedback.group_reaction.prompt}</strong> : null}
+            </div>
+          ) : null}
           <div className="feedback-actions">
             <button className="secondary-button" type="button" onClick={onRetry}>
-              重新回答
+              {onSupplement ? "重新回答" : "重新回答"}
             </button>
+            {onSupplement ? (
+              <button className="secondary-button" type="button" onClick={onSupplement}>
+                补充/修订
+              </button>
+            ) : null}
             <button className="primary-button" type="button" onClick={onNext}>
               下一题 <ArrowRight size={15} />
             </button>
@@ -1550,7 +1479,11 @@ function textValue(value: unknown) {
 }
 
 function listValue(value: unknown) {
-  if (Array.isArray(value)) return value.map((item) => textValue(item)).filter(Boolean).join("\n");
+  if (Array.isArray(value))
+    return value
+      .map((item) => textValue(item))
+      .filter(Boolean)
+      .join("\n");
   return textValue(value);
 }
 
@@ -1683,11 +1616,22 @@ function MaterialsPage() {
           summary: draft.summary.trim(),
           education: draft.education.trim(),
           experience: draft.experience.trim(),
-          skills: draft.skills.split(/[,，\n]/).map((item) => item.trim()).filter(Boolean),
-          projects: draft.projects.split(/\n+/).map((item) => item.trim()).filter(Boolean),
-          achievements: draft.achievements.split(/\n+/).map((item) => item.trim()).filter(Boolean),
+          skills: draft.skills
+            .split(/[,，\n]/)
+            .map((item) => item.trim())
+            .filter(Boolean),
+          projects: draft.projects
+            .split(/\n+/)
+            .map((item) => item.trim())
+            .filter(Boolean),
+          achievements: draft.achievements
+            .split(/\n+/)
+            .map((item) => item.trim())
+            .filter(Boolean),
         };
-        await confirmDocument(documentId(selected), { parsed: { kind, profile } });
+        await confirmDocument(documentId(selected), {
+          parsed: { kind, profile },
+        });
         await saveUserProfile(profile);
       } else {
         const job = {
@@ -1697,15 +1641,22 @@ function MaterialsPage() {
           location: draft.location.trim(),
           seniority: draft.seniority.trim(),
           summary: draft.summary.trim(),
-          skills: draft.skills.split(/[,，\n]/).map((item) => item.trim()).filter(Boolean),
-          responsibilities: draft.responsibilities.split(/\n+/).map((item) => item.trim()).filter(Boolean),
-          requirements: draft.requirements.split(/\n+/).map((item) => item.trim()).filter(Boolean),
+          skills: draft.skills
+            .split(/[,，\n]/)
+            .map((item) => item.trim())
+            .filter(Boolean),
+          responsibilities: draft.responsibilities
+            .split(/\n+/)
+            .map((item) => item.trim())
+            .filter(Boolean),
+          requirements: draft.requirements
+            .split(/\n+/)
+            .map((item) => item.trim())
+            .filter(Boolean),
         };
         await confirmDocument(documentId(selected), { parsed: { kind, job } });
       }
-      setDocuments((current) =>
-        current.map((item) => (documentId(item) === documentId(selected) ? { ...item, status: "confirmed" } : item)),
-      );
+      setDocuments((current) => current.map((item) => (documentId(item) === documentId(selected) ? { ...item, status: "confirmed" } : item)));
       setNotice(kind === "resume" ? "简历已保存到个人档案。" : "JD 已保存，可前往岗位匹配查看结果。");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "保存失败，请稍后重试");
@@ -1731,7 +1682,12 @@ function MaterialsPage() {
     }
   }
 
-  const fields: Array<{ key: keyof MaterialDraft; label: string; multiline?: boolean; hint?: string }> =
+  const fields: Array<{
+    key: keyof MaterialDraft;
+    label: string;
+    multiline?: boolean;
+    hint?: string;
+  }> =
     kind === "resume"
       ? [
           { key: "full_name", label: "姓名" },
@@ -1739,9 +1695,24 @@ function MaterialsPage() {
           { key: "summary", label: "个人简介", multiline: true },
           { key: "education", label: "教育背景", multiline: true },
           { key: "experience", label: "工作 / 实习经历", multiline: true },
-          { key: "skills", label: "技能", multiline: true, hint: "用逗号或换行分隔" },
-          { key: "projects", label: "项目经历", multiline: true, hint: "每行一段经历" },
-          { key: "achievements", label: "关键成果", multiline: true, hint: "每行一项结果或指标" },
+          {
+            key: "skills",
+            label: "技能",
+            multiline: true,
+            hint: "用逗号或换行分隔",
+          },
+          {
+            key: "projects",
+            label: "项目经历",
+            multiline: true,
+            hint: "每行一段经历",
+          },
+          {
+            key: "achievements",
+            label: "关键成果",
+            multiline: true,
+            hint: "每行一项结果或指标",
+          },
         ]
       : [
           { key: "title", label: "岗位名称" },
@@ -1750,9 +1721,24 @@ function MaterialsPage() {
           { key: "location", label: "工作地点" },
           { key: "seniority", label: "职级" },
           { key: "summary", label: "岗位简介", multiline: true },
-          { key: "skills", label: "核心技能", multiline: true, hint: "用逗号或换行分隔" },
-          { key: "responsibilities", label: "工作职责", multiline: true, hint: "每行一项职责" },
-          { key: "requirements", label: "任职要求", multiline: true, hint: "每行一项要求" },
+          {
+            key: "skills",
+            label: "核心技能",
+            multiline: true,
+            hint: "用逗号或换行分隔",
+          },
+          {
+            key: "responsibilities",
+            label: "工作职责",
+            multiline: true,
+            hint: "每行一项职责",
+          },
+          {
+            key: "requirements",
+            label: "任职要求",
+            multiline: true,
+            hint: "每行一项要求",
+          },
         ];
 
   return (
@@ -1770,16 +1756,24 @@ function MaterialsPage() {
       {error ? (
         <div className="source-note materials-alert" role="alert">
           <AlertCircle size={16} />
-          <div><strong>资料服务提示</strong><p>{error}</p></div>
+          <div>
+            <strong>资料服务提示</strong>
+            <p>{error}</p>
+          </div>
         </div>
       ) : null}
       {notice ? (
-        <div className="materials-notice" role="status"><CheckCircle2 size={16} /> {notice}</div>
+        <div className="materials-notice" role="status">
+          <CheckCircle2 size={16} /> {notice}
+        </div>
       ) : null}
       <div className="materials-layout">
         <aside className="materials-library panel">
           <div className="panel-title-row">
-            <div><span className="eyebrow">资料库</span><h3>我的求职文件</h3></div>
+            <div>
+              <span className="eyebrow">资料库</span>
+              <h3>我的求职文件</h3>
+            </div>
             <FileCheck2 size={17} className="muted-icon" />
           </div>
           <div className="material-tabs" role="tablist" aria-label="资料类型">
@@ -1792,13 +1786,31 @@ function MaterialsPage() {
           </div>
           <div className="materials-file-list">
             {loading ? <div className="materials-empty">正在加载资料…</div> : null}
-            {!loading && !visibleDocuments.length ? <div className="materials-empty">还没有{kind === "resume" ? "简历" : "JD"}<span>上传文件后会出现在这里</span></div> : null}
+            {!loading && !visibleDocuments.length ? (
+              <div className="materials-empty">
+                还没有{kind === "resume" ? "简历" : "JD"}
+                <span>上传文件后会出现在这里</span>
+              </div>
+            ) : null}
             {visibleDocuments.map((item) => {
               const id = documentId(item);
               return (
-                <button key={id || item.filename} className={id === selectedId ? "material-file selected" : "material-file"} type="button" onClick={() => { setSelectedId(id); setDraft(draftFromDocument(item, kind)); }}>
-                  <span className="material-file-icon"><FileText size={16} /></span>
-                  <span className="material-file-copy"><strong>{item.filename}</strong><small>{item.status === "confirmed" ? "已确认" : item.status === "failed" ? "解析失败" : "待校对"}</small></span>
+                <button
+                  key={id || item.filename}
+                  className={id === selectedId ? "material-file selected" : "material-file"}
+                  type="button"
+                  onClick={() => {
+                    setSelectedId(id);
+                    setDraft(draftFromDocument(item, kind));
+                  }}
+                >
+                  <span className="material-file-icon">
+                    <FileText size={16} />
+                  </span>
+                  <span className="material-file-copy">
+                    <strong>{item.filename}</strong>
+                    <small>{item.status === "confirmed" ? "已确认" : item.status === "failed" ? "解析失败" : "待校对"}</small>
+                  </span>
                   <ArrowRight size={14} />
                 </button>
               );
@@ -1807,22 +1819,74 @@ function MaterialsPage() {
         </aside>
         <section className="materials-editor">
           <div className="upload-panel panel">
-            <div className="upload-copy"><span className="upload-icon"><UploadCloud size={20} /></span><div><strong>上传{kind === "resume" ? "简历" : "岗位 JD"}</strong><p>支持 PDF、DOCX、TXT、MD，单文件不超过 5 MB</p></div></div>
+            <div className="upload-copy">
+              <span className="upload-icon">
+                <UploadCloud size={20} />
+              </span>
+              <div>
+                <strong>上传{kind === "resume" ? "简历" : "岗位 JD"}</strong>
+                <p>支持 PDF、DOCX、TXT、MD，单文件不超过 5 MB</p>
+              </div>
+            </div>
             <label className="secondary-button upload-button">
               {uploading ? <RotateCcw size={15} className="spin" /> : <Plus size={15} />}
               {uploading ? "解析中…" : "选择文件"}
-              <input type="file" accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void handleUpload(file); }} disabled={uploading} />
+              <input
+                type="file"
+                accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.currentTarget.value = "";
+                  if (file) void handleUpload(file);
+                }}
+                disabled={uploading}
+              />
             </label>
           </div>
           <div className="materials-form-panel panel">
             <div className="panel-title-row materials-form-heading">
-              <div><span className="eyebrow">AI 提取结果</span><h3>{selected ? selected.filename : `等待上传${kind === "resume" ? "简历" : "JD"}`}</h3></div>
+              <div>
+                <span className="eyebrow">AI 提取结果</span>
+                <h3>{selected ? selected.filename : `等待上传${kind === "resume" ? "简历" : "JD"}`}</h3>
+              </div>
               {selected ? <span className={selected.status === "confirmed" ? "small-tag green-tag" : "small-tag blue-tag"}>{selected.status === "confirmed" ? "已确认" : "需要校对"}</span> : null}
             </div>
-            {selected ? <div className="ai-review-note"><Sparkles size={15} /><span>强模型仅根据文件内容填充，空白字段代表未识别到信息。保存前请人工核对。</span></div> : null}
-            {!selected ? <div className="materials-empty materials-editor-empty"><FileText size={28} /><p>上传一份文件开始整理</p><span>解析结果会在这里展示并支持编辑</span></div> : null}
-            {selected ? <div className="materials-fields">{fields.map((field) => <label className="material-field" key={field.key}><span>{field.label}{field.hint ? <small>{field.hint}</small> : null}</span>{field.multiline ? <textarea rows={field.key === "summary" ? 3 : 4} value={draft[field.key]} onChange={(event) => updateField(field.key, event.target.value)} /> : <input value={draft[field.key]} onChange={(event) => updateField(field.key, event.target.value)} />}</label>)}</div> : null}
-            {selected ? <div className="materials-form-actions"><button className="text-button danger-text" type="button" onClick={() => void removeSelected()}><Trash2 size={15} /> 删除资料</button><button className="primary-button" type="button" onClick={() => void saveDraft()} disabled={saving}>{saving ? "保存中…" : "确认并保存到档案"} <Check size={15} /></button></div> : null}
+            {selected ? (
+              <div className="ai-review-note">
+                <Sparkles size={15} />
+                <span>强模型仅根据文件内容填充，空白字段代表未识别到信息。保存前请人工核对。</span>
+              </div>
+            ) : null}
+            {!selected ? (
+              <div className="materials-empty materials-editor-empty">
+                <FileText size={28} />
+                <p>上传一份文件开始整理</p>
+                <span>解析结果会在这里展示并支持编辑</span>
+              </div>
+            ) : null}
+            {selected ? (
+              <div className="materials-fields">
+                {fields.map((field) => (
+                  <label className="material-field" key={field.key}>
+                    <span>
+                      {field.label}
+                      {field.hint ? <small>{field.hint}</small> : null}
+                    </span>
+                    {field.multiline ? <textarea rows={field.key === "summary" ? 3 : 4} value={draft[field.key]} onChange={(event) => updateField(field.key, event.target.value)} /> : <input value={draft[field.key]} onChange={(event) => updateField(field.key, event.target.value)} />}
+                  </label>
+                ))}
+              </div>
+            ) : null}
+            {selected ? (
+              <div className="materials-form-actions">
+                <button className="text-button danger-text" type="button" onClick={() => void removeSelected()}>
+                  <Trash2 size={15} /> 删除资料
+                </button>
+                <button className="primary-button" type="button" onClick={() => void saveDraft()} disabled={saving}>
+                  {saving ? "保存中…" : "确认并保存到档案"} <Check size={15} />
+                </button>
+              </div>
+            ) : null}
           </div>
         </section>
       </div>
@@ -1832,7 +1896,7 @@ function MaterialsPage() {
 
 function MatchPage() {
   const navigate = useNavigate();
-  const [selectedRole, setSelectedRole] = useState("后端开发工程师");
+  const [selectedRoleKey, setSelectedRoleKey] = useState("后端开发工程师");
   const [jobs, setJobs] = useState<
     Array<{
       id?: string;
@@ -1847,12 +1911,12 @@ function MatchPage() {
     }>
   >([]);
   const [profile, setProfile] = useState<UserProfile>(() => loadUserProfile());
-  const [draftJob, setDraftJob] = useState(
-    () => profile.job_text || "Python FastAPI PostgreSQL Redis Docker 系统设计",
-  );
+  const [draftJob, setDraftJob] = useState(() => profile.job_text || "Python FastAPI PostgreSQL Redis Docker 系统设计");
   const [match, setMatch] = useState<MatchResponse | null>(null);
+  const [matchScores, setMatchScores] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const latestMatchRequest = useRef(0);
   const fallbackRoles = [
     {
       id: undefined as string | undefined,
@@ -1876,44 +1940,70 @@ function MatchPage() {
       gap: ["因果推断", "业务沟通"],
     },
   ];
+  const jobName = (job: (typeof jobs)[number]) => job.title || job.name || job.role || "未命名岗位";
+  const jobKey = (job: (typeof jobs)[number], index: number) => String(job.id || job.job_id || `${jobName(job)}-${index}`);
   const roles = jobs.length
-    ? jobs.map((job) => ({
+    ? jobs.map((job, index) => ({
         id: job.id || job.job_id,
-        name: job.title || job.name || job.role || "未命名岗位",
+        key: jobKey(job, index),
+        name: jobName(job),
         company: job.company || "已保存岗位",
         fallbackSkills: job.skills?.length ? job.skills : ["岗位技能"],
         gap: ["待补强技能"],
         jd_text: job.jd_text || job.job_text || "",
       }))
-    : fallbackRoles;
-  const role = roles.find((item) => item.name === selectedRole) ?? roles[0];
-  const matchedSkills = match?.matched_skills?.length
-    ? match.matched_skills
-    : profile.skills.length
-      ? profile.skills
-      : role.fallbackSkills;
-  const computedScore = Math.min(98, Math.max(45, 58 + matchedSkills.length * 8));
-  const score = Number.isFinite(Number(match?.match_score))
-    ? Number(match?.match_score)
-    : computedScore;
+    : fallbackRoles.map((item) => ({ ...item, key: item.name, jd_text: "" }));
+  const role = roles.find((item) => item.key === selectedRoleKey) ?? roles[0];
+  const selectedRole = role?.name || "通用软件开发工程师";
+  const matchedSkills = match ? (Array.isArray(match.profile_matched_skills) ? match.profile_matched_skills : match.matched_skills || []) : profile.skills.length ? profile.skills : role?.fallbackSkills || [];
+  const requiredSkills = match?.required_skills?.length ? match.required_skills : role?.fallbackSkills || [];
+  const gapSkills = requiredSkills.filter((skill) => !matchedSkills.includes(skill));
+
+  function fallbackMatchScore(item: (typeof roles)[number]) {
+    const required = new Set((item.fallbackSkills || []).map((skill) => skill.trim().toLowerCase()));
+    const candidate = new Set(profile.skills.map((skill) => skill.trim().toLowerCase()));
+    if (!required.size) return 0;
+    return Math.round(([...required].filter((skill) => candidate.has(skill)).length / required.size) * 100);
+  }
+
+  function scoreForRole(item: (typeof roles)[number]) {
+    return matchScores[item.key] ?? fallbackMatchScore(item);
+  }
+
+  const currentScore = role ? scoreForRole(role) : 0;
 
   async function refreshMatch() {
+    if (!role) return;
+    const requestRoleKey = role.key;
+    const requestId = ++latestMatchRequest.current;
     setLoading(true);
     setError("");
+    setMatch(null);
     try {
       const result = await previewMatch({
         mode: "technical",
         role: selectedRole,
-        job_text: draftJob,
+        job_id: role.id,
+        // A saved role owns its JD. The draft is only used by local fallback
+        // roles, so switching roles cannot accidentally reuse the prior JD.
+        job_text: jobs.length ? role.jd_text || role.fallbackSkills.join(" ") : draftJob,
         user_profile: { skills: profile.skills, projects: profile.projects },
         difficulty: "medium",
       });
+      if (latestMatchRequest.current !== requestId) return;
       setMatch(result);
+      if (Number.isFinite(Number(result.match_score))) {
+        setMatchScores((scores) => ({
+          ...scores,
+          [requestRoleKey]: Number(result.match_score),
+        }));
+      }
     } catch (cause) {
+      if (latestMatchRequest.current !== requestId) return;
       setMatch(null);
       setError(cause instanceof Error ? cause.message : "岗位匹配服务暂不可用，已显示本地建议。");
     } finally {
-      setLoading(false);
+      if (latestMatchRequest.current === requestId) setLoading(false);
     }
   }
   useEffect(() => {
@@ -1923,13 +2013,7 @@ function MatchPage() {
         if (cancelled || !result.length) return;
         setJobs(result);
         const first = result[0];
-        const firstName = first.title || first.name || first.role || "未命名岗位";
-        setSelectedRole((current) =>
-          result.some((job) => (job.title || job.name || job.role) === current)
-            ? current
-            : firstName,
-        );
-        if (first.jd_text || first.job_text) setDraftJob(String(first.jd_text || first.job_text));
+        setSelectedRoleKey((current) => (result.some((job, index) => jobKey(job, index) === current) ? current : jobKey(first, 0)));
       })
       .catch(() => {
         /* local fallback roles remain usable */
@@ -1940,7 +2024,12 @@ function MatchPage() {
   }, []);
   useEffect(() => {
     if (role) void refreshMatch();
-  }, [selectedRole, jobs.length]);
+  }, [selectedRoleKey, jobs, profile.skills, profile.projects]);
+  useEffect(() => {
+    // Cached scores belong to one profile snapshot. A resume/profile change
+    // must invalidate them before new previews return.
+    setMatchScores({});
+  }, [profile.skills, profile.projects]);
   return (
     <div className="match-page">
       <section className="page-intro">
@@ -1949,11 +2038,7 @@ function MatchPage() {
           <h2>把个人经历，映射到真实岗位。</h2>
           <p>GraphRAG 会结合 JD、技能图谱和你的训练证据，给出可解释的匹配结果。</p>
         </div>
-        <button
-          className="secondary-button"
-          type="button"
-          onClick={() => navigate("/materials")}
-        >
+        <button className="secondary-button" type="button" onClick={() => navigate("/materials")}>
           <FolderOpen size={16} />
           管理求职资料
         </button>
@@ -1984,27 +2069,15 @@ function MatchPage() {
           <div className="role-list">
             {roles.map((item) => (
               <button
-                key={item.name}
+                key={item.key}
                 type="button"
-                className={
-                  selectedRole === item.name ? "role-list-item selected" : "role-list-item"
-                }
+                className={selectedRoleKey === item.key ? "role-list-item selected" : "role-list-item"}
                 onClick={() => {
-                  setSelectedRole(item.name);
+                  setSelectedRoleKey(item.key);
                   if ("jd_text" in item && item.jd_text) setDraftJob(String(item.jd_text));
                 }}
               >
-                <span
-                  className={`role-score score-${item.name === "后端开发工程师" ? "high" : item.name === "算法工程师" ? "mid" : "low"}`}
-                >
-                  {item.name === selectedRole
-                    ? score
-                    : item.name === "后端开发工程师"
-                      ? 88
-                      : item.name === "算法工程师"
-                        ? 79
-                        : 71}
-                </span>
+                <span className={`role-score score-${scoreForRole(item) >= 75 ? "high" : scoreForRole(item) >= 50 ? "mid" : "low"}`}>{scoreForRole(item)}</span>
                 <span>
                   <strong>{item.name}</strong>
                   <small>{item.company}</small>
@@ -2013,11 +2086,7 @@ function MatchPage() {
               </button>
             ))}
           </div>
-          <button
-            className="role-add-button"
-            type="button"
-            onClick={() => navigate("/materials")}
-          >
+          <button className="role-add-button" type="button" onClick={() => navigate("/materials")}>
             <Plus size={15} />
             上传新的 JD
           </button>
@@ -2031,11 +2100,7 @@ function MatchPage() {
                 {role.company} · {loading ? "正在计算…" : "已同步数据库"}
               </p>
             </div>
-            <button
-              className="primary-button"
-              type="button"
-              onClick={() => navigate(`/practice?role=${encodeURIComponent(role.name)}${role.id ? `&job_id=${encodeURIComponent(role.id)}` : ""}`)}
-            >
+            <button className="primary-button" type="button" onClick={() => navigate(`/practice?role=${encodeURIComponent(role.name)}${role.id ? `&job_id=${encodeURIComponent(role.id)}` : ""}`)}>
               <Sparkles size={16} />
               用此岗位开始训练
             </button>
@@ -2044,7 +2109,7 @@ function MatchPage() {
             <div className="match-score-card">
               <span className="eyebrow">综合匹配度</span>
               <div className="large-score">
-                <strong>{loading ? "—" : score}</strong>
+                <strong>{loading ? "—" : currentScore}</strong>
                 <span>/100</span>
               </div>
               <div className="score-caption">
@@ -2058,11 +2123,7 @@ function MatchPage() {
               </div>
               <div>
                 <strong>为什么匹配</strong>
-                <p>
-                  {match?.questions?.length
-                    ? `已从题库召回 ${match.questions.length} 道相关题目，覆盖 ${matchedSkills.slice(0, 4).join("、")}。`
-                    : "你的个人技能和项目会用于召回岗位相关题目，并在训练中持续更新匹配结果。"}
-                </p>
+                <p>{match?.questions?.length ? `已从题库召回 ${match.questions.length} 道相关题目，覆盖 ${matchedSkills.slice(0, 4).join("、")}。` : "你的个人技能和项目会用于召回岗位相关题目，并在训练中持续更新匹配结果。"}</p>
                 <div className="source-line">
                   <ShieldCheck size={14} />
                   来源和匹配分数可在题库中追溯
@@ -2098,14 +2159,10 @@ function MatchPage() {
                   建议补强
                 </span>
                 <div className="skill-chip-list">
-                  {role.gap.map((skill) => (
+                  {(gapSkills.length ? gapSkills : role.gap).map((skill) => (
                     <div className="skill-chip gap" key={skill}>
                       <span>{skill}</span>
-                      <button
-                        type="button"
-                        onClick={() => navigate("/practice")}
-                        aria-label={`训练 ${skill}`}
-                      >
+                      <button type="button" onClick={() => navigate("/practice")} aria-label={`训练 ${skill}`}>
                         <ArrowRight size={14} />
                       </button>
                     </div>
@@ -2170,19 +2227,11 @@ function QuestionBankPage() {
       });
       const mapped = result.map(questionFromKnowledge);
       setItems(mapped.length ? mapped : questions);
-      setSelected((current) =>
-        current && mapped.some((item) => item.id === current.id)
-          ? current
-          : mapped[0] || questions[0],
-      );
+      setSelected((current) => (current && mapped.some((item) => item.id === current.id) ? current : mapped[0] || questions[0]));
     } catch (cause) {
       setItems(questions);
       setSelected((current) => current || questions[0]);
-      setError(
-        cause instanceof Error
-          ? `${cause.message}，当前显示演示题库。`
-          : "题库服务暂不可用，当前显示演示题库。",
-      );
+      setError(cause instanceof Error ? `${cause.message}，当前显示演示题库。` : "题库服务暂不可用，当前显示演示题库。");
     } finally {
       setLoading(false);
     }
@@ -2209,13 +2258,7 @@ function QuestionBankPage() {
       cancelled = true;
     };
   }, []);
-  const filtered = items.filter(
-    (item) =>
-      (mode === "all" || item.mode === mode) &&
-      `${item.title}${item.prompt}${item.skills.join("")}${item.source}`
-        .toLowerCase()
-        .includes(query.toLowerCase()),
-  );
+  const filtered = items.filter((item) => (mode === "all" || item.mode === mode) && `${item.title}${item.prompt}${item.skills.join("")}${item.source}`.toLowerCase().includes(query.toLowerCase()));
   async function favorite() {
     if (!selected) return;
     try {
@@ -2236,23 +2279,12 @@ function QuestionBankPage() {
         role: selected.backend?.role || "后端开发工程师",
         job_text: profile.job_text || "Python FastAPI PostgreSQL Redis Docker 系统设计",
         user_profile: { skills: profile.skills, projects: profile.projects },
-        difficulty:
-          selected.difficulty === "高" || selected.difficulty === "hard"
-            ? "hard"
-            : selected.difficulty === "低"
-              ? "easy"
-              : "medium",
+        difficulty: selected.difficulty === "高" || selected.difficulty === "hard" ? "hard" : selected.difficulty === "低" ? "easy" : "medium",
       });
       if (selected.backend) queueQuestion(selected.backend);
-      navigate(
-        `/practice?session=${encodeURIComponent(session.session_id)}&question=${encodeURIComponent(session.question_id)}`,
-      );
+      navigate(`/practice?session=${encodeURIComponent(session.session_id)}&question=${encodeURIComponent(session.question_id)}`);
     } catch (cause) {
-      setError(
-        cause instanceof Error
-          ? `${cause.message}，无法创建训练会话。`
-          : "创建训练会话失败，请重试。",
-      );
+      setError(cause instanceof Error ? `${cause.message}，无法创建训练会话。` : "创建训练会话失败，请重试。");
     } finally {
       setJoining(false);
     }
@@ -2265,11 +2297,7 @@ function QuestionBankPage() {
           <h2>按岗位和场景，挑一道真正有用的题。</h2>
           <p>题目会带着技能、Rubric 和来源进入训练，不只是一个问题列表。</p>
         </div>
-        <button
-          className="secondary-button"
-          type="button"
-          onClick={() => setError("提交题目需要登录后开放，当前可先将题目加入训练。")}
-        >
+        <button className="secondary-button" type="button" onClick={() => setError("提交题目需要登录后开放，当前可先将题目加入训练。")}>
           <Plus size={16} />
           提交题目
         </button>
@@ -2293,11 +2321,7 @@ function QuestionBankPage() {
           <div className="search-row">
             <div className="search-input">
               <Search size={17} />
-              <input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="搜索题目、技能或岗位..."
-              />
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索题目、技能或岗位..." />
             </div>
             <button className="filter-button" type="button" onClick={() => setMode("all")}>
               <SlidersIcon />
@@ -2312,12 +2336,7 @@ function QuestionBankPage() {
                 label: item.shortLabel,
               })),
             ].map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                className={mode === item.id ? "filter-tab active" : "filter-tab"}
-                onClick={() => setMode(item.id as "all" | ModeId)}
-              >
+              <button key={item.id} type="button" className={mode === item.id ? "filter-tab active" : "filter-tab"} onClick={() => setMode(item.id as "all" | ModeId)}>
                 {item.label}
               </button>
             ))}
@@ -2330,14 +2349,7 @@ function QuestionBankPage() {
           ) : (
             <div className="question-list">
               {filtered.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  className={
-                    selected?.id === item.id ? "question-list-item selected" : "question-list-item"
-                  }
-                  onClick={() => setSelected(item)}
-                >
+                <button key={item.id} type="button" className={selected?.id === item.id ? "question-list-item selected" : "question-list-item"} onClick={() => setSelected(item)}>
                   <div className={`question-list-icon question-icon-${item.mode}`}>
                     <ModeIcon mode={item.mode} />
                   </div>
@@ -2345,9 +2357,7 @@ function QuestionBankPage() {
                     <div>
                       <strong>{item.title}</strong>
                       <span className="difficulty-tag">{item.difficulty}</span>
-                      {favorites.includes(item.id) ? (
-                        <span className="small-tag green-tag">已收藏</span>
-                      ) : null}
+                      {favorites.includes(item.id) ? <span className="small-tag green-tag">已收藏</span> : null}
                     </div>
                     <p>{item.prompt}</p>
                     <div className="question-list-meta">
@@ -2371,18 +2381,11 @@ function QuestionBankPage() {
         {selected ? (
           <aside className="question-detail-panel">
             <div className="detail-top">
-              <span
-                className={`mode-badge badge-${modeMeta.find((item) => item.id === selected.mode)?.color ?? "blue"}`}
-              >
+              <span className={`mode-badge badge-${modeMeta.find((item) => item.id === selected.mode)?.color ?? "blue"}`}>
                 <ModeIcon mode={selected.mode} />
                 {getModeLabel(selected.mode)}
               </span>
-              <button
-                className={favorites.includes(selected.id) ? "icon-button active" : "icon-button"}
-                type="button"
-                aria-label="收藏题目"
-                onClick={() => void favorite()}
-              >
+              <button className={favorites.includes(selected.id) ? "icon-button active" : "icon-button"} type="button" aria-label="收藏题目" onClick={() => void favorite()}>
                 <BookOpen size={17} />
               </button>
             </div>
@@ -2419,12 +2422,7 @@ function QuestionBankPage() {
               {selected.sourceConfidence ? <small>可信度：{selected.sourceConfidence}</small> : null}
               {selected.sourceVersion ? <small>版本：{selected.sourceVersion}</small> : null}
             </div>
-            <button
-              className="primary-button full-button"
-              type="button"
-              onClick={() => void addToTraining()}
-              disabled={joining}
-            >
+            <button className="primary-button full-button" type="button" onClick={() => void addToTraining()} disabled={joining}>
               {joining ? (
                 <>
                   <Gauge size={16} className="spin" />
@@ -2455,152 +2453,15 @@ function getModeLabel(mode: ModeId) {
   return modeMeta.find((item) => item.id === mode)?.label ?? mode;
 }
 
-function LegacyReportsPage() {
-  const legacySessions: DashboardSession[] = [];
-  return (
-    <div className="reports-page">
-      <section className="page-intro">
-        <div>
-          <span className="eyebrow">训练报告</span>
-          <h2>看见每一次回答，如何变得更好。</h2>
-          <p>评分不是结论，原句证据和下一步行动才是。</p>
-        </div>
-        <button className="secondary-button" type="button">
-          <BarChart3 size={16} />
-          导出本周报告
-        </button>
-      </section>
-      <section className="report-stat-grid">
-        <ReportStat label="本周训练" value="8" unit="次" trend="较上周 +3" color="blue" />
-        <ReportStat label="平均得分" value="81" unit="分" trend="较上周 +6" color="mint" />
-        <ReportStat label="连续训练" value="5" unit="天" trend="保持住" color="purple" />
-        <ReportStat label="待补强技能" value="3" unit="项" trend="已完成 2 项" color="coral" />
-      </section>
-      <section className="report-grid">
-        <div className="report-chart-panel">
-          <div className="section-heading">
-            <div>
-              <span className="eyebrow">能力趋势</span>
-              <h3>最近 7 次训练</h3>
-            </div>
-            <button className="select-button" type="button">
-              全部场景 <ChevronDown size={15} />
-            </button>
-          </div>
-          <div className="chart-wrap">
-            <div className="chart-y-axis">
-              <span>100</span>
-              <span>75</span>
-              <span>50</span>
-              <span>25</span>
-              <span>0</span>
-            </div>
-            <div className="chart-area">
-              <div className="chart-grid-lines">
-                <span />
-                <span />
-                <span />
-                <span />
-                <span />
-              </div>
-              <div className="chart-bars">
-                {[64, 72, 69, 78, 75, 84, 81].map((value, index) => (
-                  <div className="chart-bar-column" key={index}>
-                    <div className="chart-bar" style={{ height: `${value}%` }}>
-                      <span>{value}</span>
-                    </div>
-                    <small>
-                      {["08/24", "08/25", "08/26", "08/27", "08/28", "08/29", "今天"][index]}
-                    </small>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-          <div className="chart-legend">
-            <span>
-              <i className="legend-dot blue-dot" />
-              综合得分
-            </span>
-            <span>
-              <i className="legend-dot mint-dot" />
-              目标线 85
-            </span>
-          </div>
-        </div>
-        <aside className="report-insight-panel">
-          <div className="section-heading">
-            <div>
-              <span className="eyebrow">AI 总结</span>
-              <h3>本周的关键变化</h3>
-            </div>
-            <Sparkles size={17} className="blue-icon" />
-          </div>
-          <div className="insight-highlight">
-            <strong>+18%</strong>
-            <span>系统设计回答完整度</span>
-          </div>
-          <p>你已经能稳定说清架构模块，下一步是把“为什么这样选”说得更具体。</p>
-          <div className="insight-list">
-            <div>
-              <CheckCircle2 size={15} />
-              <span>能给出明确排查顺序</span>
-            </div>
-            <div>
-              <CheckCircle2 size={15} />
-              <span>项目结果开始出现数据证据</span>
-            </div>
-            <div>
-              <AlertCircle size={15} />
-              <span>压力追问时结论出现较晚</span>
-            </div>
-          </div>
-          <button className="secondary-button full-button" type="button">
-            查看完整复盘 <ArrowRight size={15} />
-          </button>
-        </aside>
-      </section>
-      <section className="report-table-panel">
-        <div className="section-heading">
-          <div>
-            <span className="eyebrow">训练记录</span>
-            <h3>最近完成的会话</h3>
-          </div>
-          <button className="text-button" type="button">
-            查看全部 <ArrowRight size={15} />
-          </button>
-        </div>
-        <div className="report-table">
-          <div className="report-table-head">
-            <span>岗位 / 场景</span>
-            <span>完成时间</span>
-            <span>得分</span>
-            <span>变化</span>
-          </div>
-          {legacySessions.map((session, index) => (
-            <div className="report-table-row" key={session.title}>
-              <span>
-                <i className={`table-dot dot-${session.accent}`} />
-                <strong>{session.title}</strong>
-              </span>
-              <span>{session.date}</span>
-              <span className="table-score">{session.score}</span>
-              <span className={index === 1 ? "down-change" : "up-change"}>
-                {index === 1 ? "-2" : `+${index + 3}`}
-              </span>
-            </div>
-          ))}
-        </div>
-      </section>
-    </div>
-  );
-}
-
 function ReportsPage() {
   const [history, setHistory] = useState<SessionSummary[]>([]);
   const [reports, setReports] = useState<Array<Record<string, unknown>>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null);
+  const [expandedSession, setExpandedSession] = useState<SessionSummary | null>(null);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+  const [detailsError, setDetailsError] = useState("");
   const load = async () => {
     setLoading(true);
     setError("");
@@ -2614,17 +2475,36 @@ function ReportsPage() {
       setLoading(false);
     }
   };
+  async function toggleDetails(sessionId: string) {
+    if (expandedSessionId === sessionId) {
+      setExpandedSessionId(null);
+      setExpandedSession(null);
+      setDetailsError("");
+      return;
+    }
+    setExpandedSessionId(sessionId);
+    setExpandedSession(null);
+    setDetailsLoading(true);
+    setDetailsError("");
+    try {
+      setExpandedSession(await getSessionSummary(sessionId));
+    } catch (cause) {
+      setDetailsError(cause instanceof Error ? cause.message : "对话详情加载失败");
+    } finally {
+      setDetailsLoading(false);
+    }
+  }
   useEffect(() => {
     void load();
   }, []);
-  const completed = history.filter(
-    (item) => item.status === "completed" || item.status === "finished",
-  );
-  const scored = history
-    .map((item) => Number(item.summary?.average_score ?? item.average_score))
-    .filter((value) => Number.isFinite(value));
+  const answeredHistory = history.filter((item) => {
+    const count = Number(item.turn_count ?? item.summary?.turn_count ?? item.turns?.length ?? 0);
+    return count > 0;
+  });
+  const completed = answeredHistory.filter((item) => item.status === "completed" || item.status === "finished");
+  const scored = answeredHistory.map((item) => Number(item.summary?.average_score ?? item.average_score)).filter((value) => Number.isFinite(value));
   const average = scored.length ? Math.round(scored.reduce((a, b) => a + b, 0) / scored.length) : 0;
-  const rows = history.slice(0, 7);
+  const rows = answeredHistory.slice(0, 7);
   return (
     <div className="reports-page">
       <section className="page-intro">
@@ -2660,34 +2540,10 @@ function ReportsPage() {
       ) : (
         <>
           <section className="report-stat-grid">
-            <ReportStat
-              label="训练会话"
-              value={String(history.length)}
-              unit="次"
-              trend={`已完成 ${completed.length} 次`}
-              color="blue"
-            />
-            <ReportStat
-              label="平均得分"
-              value={average ? String(average) : "—"}
-              unit="分"
-              trend={scored.length ? "来自已评分会话" : "完成训练后生成"}
-              color="mint"
-            />
-            <ReportStat
-              label="持久化报告"
-              value={String(reports.length)}
-              unit="份"
-              trend="数据库已保存"
-              color="purple"
-            />
-            <ReportStat
-              label="待复盘"
-              value={String(Math.max(0, history.length - completed.length))}
-              unit="次"
-              trend="继续完成训练"
-              color="coral"
-            />
+            <ReportStat label="训练会话" value={String(answeredHistory.length)} unit="次" trend={`已完成 ${completed.length} 次`} color="blue" />
+            <ReportStat label="平均得分" value={average ? String(average) : "—"} unit="分" trend={scored.length ? "来自已评分会话" : "完成训练后生成"} color="mint" />
+            <ReportStat label="持久化报告" value={String(reports.length)} unit="份" trend="数据库已保存" color="purple" />
+            <ReportStat label="待复盘" value={String(Math.max(0, answeredHistory.length - completed.length))} unit="次" trend="继续完成训练" color="coral" />
           </section>
           <section className="report-table-panel">
             <div className="section-heading">
@@ -2708,19 +2564,29 @@ function ReportsPage() {
                 {rows.map((item, index) => {
                   const score = Number(item.summary?.average_score ?? item.average_score);
                   return (
-                    <div className="report-table-row" key={item.session_id || index}>
-                      <span>
-                        <i className="table-dot dot-blue" />
-                        <strong>
-                          {item.role || "未命名岗位"} · {getModeLabel(item.mode || "technical")}
-                        </strong>
-                      </span>
-                      <span>{formatDate(item.updated_at || item.created_at)}</span>
-                      <span className="table-score">
-                        {Number.isFinite(score) ? Math.round(score) : "—"}
-                      </span>
-                      <span>{item.status || "进行中"}</span>
-                    </div>
+                    <Fragment key={item.session_id || index}>
+                      <button
+                        className={`report-table-row report-row-button${expandedSessionId === item.session_id ? " expanded" : ""}`}
+                        type="button"
+                        onClick={() => item.session_id && void toggleDetails(item.session_id)}
+                        disabled={!item.session_id}
+                        aria-expanded={expandedSessionId === item.session_id}
+                      >
+                        <span>
+                          <i className="table-dot dot-blue" />
+                          <strong>
+                            {item.role || "未命名岗位"} · {getModeLabel(item.mode || "technical")}
+                          </strong>
+                        </span>
+                        <span>{formatDate(item.updated_at || item.created_at)}</span>
+                        <span className="table-score">{Number.isFinite(score) ? Math.round(score) : "—"}</span>
+                        <span className="report-row-status">
+                          {item.status || "进行中"}
+                          {item.session_id ? <ChevronDown size={13} /> : null}
+                        </span>
+                      </button>
+                      {expandedSessionId === item.session_id ? <ReportConversationDetails session={expandedSession} loading={detailsLoading} error={detailsError} /> : null}
+                    </Fragment>
                   );
                 })}
               </div>
@@ -2733,6 +2599,112 @@ function ReportsPage() {
           </section>
         </>
       )}
+    </div>
+  );
+}
+
+function ReportConversationDetails({ session, loading, error }: { session: SessionSummary | null; loading: boolean; error: string }) {
+  if (loading) {
+    return (
+      <div className="report-detail-row report-detail-loading">
+        <RotateCcw size={16} className="spin" />
+        <span>正在加载对话详情...</span>
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="report-detail-row report-detail-error" role="alert">
+        <AlertCircle size={16} />
+        <span>{error}</span>
+      </div>
+    );
+  }
+  const turns = session?.turns || [];
+  if (!turns.length) {
+    return <div className="report-detail-row report-detail-empty">该训练没有可展示的回答。</div>;
+  }
+  const sessionRole = session?.session?.role || session?.role || "未命名岗位";
+  return (
+    <div className="report-detail-row">
+      <div className="report-detail-heading">
+        <div>
+          <span className="eyebrow">对话详情</span>
+          <strong>{sessionRole}</strong>
+        </div>
+        <span>{turns.length} 轮回答</span>
+      </div>
+      <div className="conversation-list">
+        {turns.map((rawTurn, index) => {
+          const turn = rawTurn as {
+            question_id?: string;
+            question_text?: string;
+            answer_text?: string;
+            code?: string;
+            created_at?: string;
+            feedback?: BackendFeedback | null;
+            algorithm_result?: AlgorithmResult | null;
+          };
+          const feedback = turn.feedback;
+          const scores = feedback?.scores ? Object.entries(feedback.scores) : [];
+          return (
+            <article className="conversation-turn" key={`${turn.question_id || "question"}-${index}`}>
+              <div className="conversation-turn-meta">
+                <span>第 {index + 1} 轮</span>
+                <span>{formatDate(turn.created_at)}</span>
+              </div>
+              <div className="conversation-block">
+                <span className="conversation-label">面试官问题</span>
+                <p>{turn.question_text || `问题 ${turn.question_id || index + 1}`}</p>
+              </div>
+              <div className="conversation-block answer-block">
+                <span className="conversation-label">你的回答</span>
+                {turn.answer_text ? <p>{turn.answer_text}</p> : null}
+                {turn.code ? <pre>{turn.code}</pre> : null}
+                {turn.algorithm_result ? (
+                  <small>
+                    判题结果：{turn.algorithm_result.passed}/{turn.algorithm_result.total} 个测试通过
+                  </small>
+                ) : null}
+              </div>
+              {feedback ? (
+                <div className="conversation-feedback">
+                  <div className="conversation-label">AI 反馈</div>
+                  {scores.length ? (
+                    <div className="conversation-score-list">
+                      {scores.map(([label, value]) => (
+                        <span key={label}>
+                          {label} <strong>{value}</strong>
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                  {feedback.evidence_quotes?.length ? (
+                    <p>
+                      <strong>原句证据：</strong>
+                      {feedback.evidence_quotes.join("；")}
+                    </p>
+                  ) : null}
+                  {feedback.improvements?.length ? (
+                    <p>
+                      <strong>改进建议：</strong>
+                      {feedback.improvements.join("；")}
+                    </p>
+                  ) : null}
+                  {feedback.better_answer ? (
+                    <p>
+                      <strong>参考组织：</strong>
+                      {feedback.better_answer}
+                    </p>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="conversation-feedback muted-feedback">该轮反馈尚未生成。</div>
+              )}
+            </article>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -2750,19 +2722,7 @@ function formatDate(value: unknown) {
       });
 }
 
-function ReportStat({
-  label,
-  value,
-  unit,
-  trend,
-  color,
-}: {
-  label: string;
-  value: string;
-  unit: string;
-  trend: string;
-  color: string;
-}) {
+function ReportStat({ label, value, unit, trend, color }: { label: string; value: string; unit: string; trend: string; color: string }) {
   return (
     <article className="report-stat">
       <span className={`stat-icon stat-${color}`}>
@@ -2800,28 +2760,9 @@ function SettingsPage() {
             <span className="small-tag green-tag">已生效</span>
           </div>
           <div className="route-list">
-            <RouteRow
-              icon={<CpuIcon />}
-              title="本地双卡 4090"
-              detail="抽取、embedding、基础评分"
-              status="在线"
-              active={localEnabled}
-              onClick={() => setLocalEnabled((value) => !value)}
-            />
-            <RouteRow
-              icon={<Sparkles size={17} />}
-              title="第三方强模型"
-              detail="复杂出题、压力面追问和长反馈"
-              status="按需"
-              active={true}
-            />
-            <RouteRow
-              icon={<Database size={17} />}
-              title="GraphRAG 检索"
-              detail="岗位、技能、题目和来源的混合检索"
-              status="在线"
-              active={true}
-            />
+            <RouteRow icon={<CpuIcon />} title="本地双卡 4090" detail="抽取、embedding、基础评分" status="在线" active={localEnabled} onClick={() => setLocalEnabled((value) => !value)} />
+            <RouteRow icon={<Sparkles size={17} />} title="第三方强模型" detail="复杂出题、压力面追问和长反馈" status="按需" active={true} />
+            <RouteRow icon={<Database size={17} />} title="GraphRAG 检索" detail="岗位、技能、题目和来源的混合检索" status="在线" active={true} />
           </div>
         </section>
         <section className="settings-panel">
@@ -2836,12 +2777,7 @@ function SettingsPage() {
               <strong>展示原句证据</strong>
               <p>反馈中保留回答里的关键句，方便复盘。</p>
             </div>
-            <button
-              className={showEvidence ? "toggle active" : "toggle"}
-              type="button"
-              aria-label="切换原句证据"
-              onClick={() => setShowEvidence((value) => !value)}
-            >
+            <button className={showEvidence ? "toggle active" : "toggle"} type="button" aria-label="切换原句证据" onClick={() => setShowEvidence((value) => !value)}>
               <span />
             </button>
           </div>
@@ -2878,19 +2814,19 @@ function AccountPage({ auth, onAuthChange }: { auth: AuthState; onAuthChange: (v
     setBusy(true);
     setNotice("");
     try {
-      const next = mode === "register"
-        ? await registerAccount({ display_name: displayName.trim(), email: email.trim(), password })
-        : await loginAccount({ email: email.trim(), password });
+      const next =
+        mode === "register"
+          ? await registerAccount({
+              display_name: displayName.trim(),
+              email: email.trim(),
+              password,
+            })
+          : await loginAccount({ email: email.trim(), password });
       onAuthChange(next);
       navigate("/");
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : "认证服务暂不可用";
-      setNotice(
-        message === "email_already_registered" ? "该邮箱已经注册，请直接登录。"
-          : message === "email_or_password_invalid" ? "邮箱或密码不正确。"
-            : message === "email_invalid" ? "请输入有效的邮箱地址。"
-              : message,
-      );
+      setNotice(message === "email_already_registered" ? "该邮箱已经注册，请直接登录。" : message === "email_or_password_invalid" ? "邮箱或密码不正确。" : message === "email_invalid" ? "请输入有效的邮箱地址。" : message);
     } finally {
       setBusy(false);
     }
@@ -2923,7 +2859,9 @@ function AccountPage({ auth, onAuthChange }: { auth: AuthState; onAuthChange: (v
       <section className="account-panel">
         {auth.authenticated ? (
           <div className="account-summary">
-            <span className="account-avatar"><UserRound size={28} /></span>
+            <span className="account-avatar">
+              <UserRound size={28} />
+            </span>
             <div>
               <span className="small-tag green-tag">正式账户</span>
               <h3>{auth.user.display_name}</h3>
@@ -2931,26 +2869,66 @@ function AccountPage({ auth, onAuthChange }: { auth: AuthState; onAuthChange: (v
               <small>账户数据已由服务端身份校验隔离，客户端不能通过修改用户 ID 访问其他账户。</small>
             </div>
             <button className="secondary-button danger-button" type="button" disabled={busy} onClick={() => void logout()}>
-              <LogOut size={16} />退出登录
+              <LogOut size={16} />
+              退出登录
             </button>
           </div>
         ) : (
           <>
             <div className="account-guest-note">
               <ShieldCheck size={18} />
-              <div><strong>当前是临时工作区</strong><p>注册会直接升级当前临时用户，已经保存的档案、JD 和训练记录都会保留。</p></div>
+              <div>
+                <strong>当前是临时工作区</strong>
+                <p>注册会直接升级当前临时用户，已经保存的档案、JD 和训练记录都会保留。</p>
+              </div>
             </div>
             <div className="auth-tabs">
-              <button className={mode === "register" ? "active" : ""} type="button" onClick={() => setMode("register")}>注册账户</button>
-              <button className={mode === "login" ? "active" : ""} type="button" onClick={() => setMode("login")}>已有账户登录</button>
+              <button className={mode === "register" ? "active" : ""} type="button" onClick={() => setMode("register")}>
+                注册账户
+              </button>
+              <button className={mode === "login" ? "active" : ""} type="button" onClick={() => setMode("login")}>
+                已有账户登录
+              </button>
             </div>
             <form className="auth-form" onSubmit={(event) => void submit(event)}>
               {mode === "register" ? (
-                <label><span>显示名称</span><div className="auth-input"><UserRound size={17} /><input value={displayName} onChange={(event) => setDisplayName(event.target.value)} minLength={1} maxLength={80} required placeholder="例如：张三" /></div></label>
+                <label>
+                  <span>显示名称</span>
+                  <div className="auth-input">
+                    <UserRound size={17} />
+                    <input value={displayName} onChange={(event) => setDisplayName(event.target.value)} minLength={1} maxLength={80} required placeholder="例如：张三" />
+                  </div>
+                </label>
               ) : null}
-              <label><span>邮箱</span><div className="auth-input"><Mail size={17} /><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required placeholder="name@example.com" /></div></label>
-              <label><span>密码</span><div className="auth-input"><LockKeyhole size={17} /><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "register" ? "new-password" : "current-password"} minLength={mode === "register" ? 8 : 1} maxLength={128} required placeholder={mode === "register" ? "至少 8 位" : "输入密码"} /></div></label>
-              {notice ? <div className="auth-error" role="alert"><AlertCircle size={16} />{notice}</div> : null}
+              <label>
+                <span>邮箱</span>
+                <div className="auth-input">
+                  <Mail size={17} />
+                  <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required placeholder="name@example.com" />
+                </div>
+              </label>
+              <label>
+                <span>密码</span>
+                <div className="auth-input">
+                  <LockKeyhole size={17} />
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(event) => setPassword(event.target.value)}
+                    autoComplete={mode === "register" ? "new-password" : "current-password"}
+                    minLength={mode === "register" ? 8 : 1}
+                    maxLength={128}
+                    required
+                    placeholder={mode === "register" ? "至少 8 位" : "输入密码"}
+                  />
+                </div>
+              </label>
+              {notice ? (
+                <div className="auth-error" role="alert">
+                  <AlertCircle size={16} />
+                  {notice}
+                </div>
+              ) : null}
               <button className="primary-button full-button" type="submit" disabled={busy}>
                 {busy ? <Gauge className="spin" size={16} /> : <LogIn size={16} />}
                 {mode === "register" ? "注册并保留当前数据" : "登录独立工作区"}
@@ -2958,27 +2936,18 @@ function AccountPage({ auth, onAuthChange }: { auth: AuthState; onAuthChange: (v
             </form>
           </>
         )}
-        {notice && auth.authenticated ? <div className="auth-error" role="alert"><AlertCircle size={16} />{notice}</div> : null}
+        {notice && auth.authenticated ? (
+          <div className="auth-error" role="alert">
+            <AlertCircle size={16} />
+            {notice}
+          </div>
+        ) : null}
       </section>
     </div>
   );
 }
 
-function RouteRow({
-  icon,
-  title,
-  detail,
-  status,
-  active,
-  onClick,
-}: {
-  icon: ReactNode;
-  title: string;
-  detail: string;
-  status: string;
-  active: boolean;
-  onClick?: () => void;
-}) {
+function RouteRow({ icon, title, detail, status, active, onClick }: { icon: ReactNode; title: string; detail: string; status: string; active: boolean; onClick?: () => void }) {
   return (
     <div className="route-row">
       <span className="route-icon">{icon}</span>
@@ -2988,12 +2957,7 @@ function RouteRow({
       </div>
       <span className="route-status">{status}</span>
       {onClick ? (
-        <button
-          className={active ? "toggle active" : "toggle"}
-          type="button"
-          aria-label={`切换 ${title}`}
-          onClick={onClick}
-        >
+        <button className={active ? "toggle active" : "toggle"} type="button" aria-label={`切换 ${title}`} onClick={onClick}>
           <span />
         </button>
       ) : (

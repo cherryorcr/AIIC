@@ -138,12 +138,19 @@ CREATE TABLE IF NOT EXISTS turns (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     question_id TEXT NOT NULL,
+    question_text TEXT NOT NULL DEFAULT '',
     answer_text TEXT NOT NULL DEFAULT '',
     code TEXT,
     language TEXT,
+    parent_turn_id TEXT,
+    answer_mode TEXT NOT NULL DEFAULT 'answer',
     algorithm_result_json JSONB,
     created_at TIMESTAMPTZ NOT NULL
 );
+
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS question_text TEXT NOT NULL DEFAULT '';
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS parent_turn_id TEXT;
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS answer_mode TEXT NOT NULL DEFAULT 'answer';
 
 CREATE TABLE IF NOT EXISTS feedback (
     id TEXT PRIMARY KEY,

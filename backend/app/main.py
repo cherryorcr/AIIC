@@ -37,7 +37,7 @@ from app.services.auth import (
 from app.services.documents import ALLOWED_EXTENSIONS, extract_document_text, parse_document
 from app.services.model_router import ModelRouter
 from app.services.prompts import SCENE_POLICIES
-from app.services.rag import GraphRAGService, MODE_TO_PROCESS, extract_skills
+from app.services.rag import GraphRAGService, MODE_TO_PROCESS, extract_skills, normalize_skill
 from app.services.sandbox import SandboxService
 from app.storage.db import Database
 
@@ -111,19 +111,57 @@ def list_scenes() -> dict[str, Any]:
 
 
 @app.post("/api/v1/matches")
-def preview_match(request: SessionCreate) -> dict[str, Any]:
+def preview_match(request: SessionCreate, http_request: Request, response: Response) -> dict[str, Any]:
     """Preview role/skill/question matching without creating an interview session."""
+    role = request.role
+    job_text = request.job_text
+    profile_payload = request.user_profile.model_dump()
+    if request.job_id:
+        user_id = _resolve_user(http_request, response)
+        job = db.get_job(str(request.job_id))
+        if job is None or job.get("user_id") != user_id:
+            raise HTTPException(status_code=404, detail="job_not_found")
+        job_text = job_text or str(job.get("jd_text") or job.get("job_text") or "")
+        if role == "通用软件开发工程师":
+            role = str(job.get("role") or job.get("title") or role)
+        if not any(profile_payload.get(key) for key in ("skills", "projects", "education", "experience")):
+            profile_payload = db.get_user_profile(user_id) or profile_payload
     matched = rag.match(
         mode=request.mode,
-        role=request.role,
-        job_text=request.job_text,
-        profile=request.user_profile.model_dump(),
+        role=role,
+        job_text=job_text,
+        profile=profile_payload,
         difficulty=request.difficulty,
     )
     questions = matched.get("questions", [])
-    # This is deliberately an explainable heuristic score for the MVP; a
-    # configured model can later replace it without changing the response shape.
-    score = min(100, max(0, 50 + len(matched.get("matched_skills", [])) * 5 + min(len(questions), 5) * 2))
+    # Match score is a stable snapshot of the candidate profile against this
+    # role's JD. It must not depend on how many questions happened to be
+    # retrieved, otherwise selecting a role or changing the question bank can
+    # make an unchanged resume/JD appear to have a different score.
+    required_skills = {
+        normalize_skill(skill)
+        for skill in extract_skills(f"{role} {job_text}")
+        if str(skill).strip()
+    }
+    profile_text = " ".join(
+        [
+            *(profile_payload.get("skills") or []),
+            *(profile_payload.get("projects") or []),
+            profile_payload.get("experience") or "",
+        ]
+    )
+    candidate_skills = {
+        normalize_skill(skill)
+        for skill in extract_skills(profile_text)
+        if str(skill).strip()
+    }
+    candidate_skills.update(
+        normalize_skill(skill)
+        for skill in profile_payload.get("skills") or []
+        if str(skill).strip()
+    )
+    profile_matched_skills = sorted(required_skills & candidate_skills)
+    score = round(100 * len(profile_matched_skills) / len(required_skills)) if required_skills else 0
     confidences = [str(question.get("source_confidence") or "").lower() for question in questions]
     if any(value == "synthetic_mock" for value in confidences):
         source_confidence = "synthetic_mock"
@@ -134,8 +172,10 @@ def preview_match(request: SessionCreate) -> dict[str, Any]:
     else:
         source_confidence = "observed"
     return {
-        "role": request.role,
+        "role": role,
         "match_score": score,
+        "required_skills": sorted(required_skills),
+        "profile_matched_skills": profile_matched_skills,
         "matched_skills": matched.get("matched_skills", []),
         "questions": questions,
         "source_confidence": source_confidence,
@@ -163,6 +203,10 @@ def public_questions(
     # user-facing Chinese stage labels. Accept both at the API boundary.
     process_type = MODE_TO_PROCESS.get(process_type or "", process_type)
     items = db.list_questions(process_type=process_type, limit=max(1, min(limit, 500)))
+    # A legacy database may still contain an older ID for the same conceptual
+    # prompt. Apply the same semantic de-duplication used by GraphRAG before
+    # exposing the public question bank.
+    items = rag._dedupe(items)
     normalized_query = (query or q or "").strip().lower()
     normalized_skill = (skill or "").strip().lower()
     if normalized_query or normalized_skill:
@@ -560,6 +604,11 @@ def get_user_report(report_id: str, request: Request, response: Response) -> dic
     report = db.get_report(report_id)
     if report is None or report.get("user_id") != uid:
         raise HTTPException(status_code=404, detail="report_not_found")
+    if report.get("session_id"):
+        session = db.get_session(str(report["session_id"]))
+        if session is not None and session.get("user_id") == uid:
+            report["turns"] = db.list_turns(str(report["session_id"]))
+            report["session"] = session
     return {"report": report}
 
 
@@ -701,6 +750,7 @@ def list_knowledge_items(
             limit=max(1, min(limit, 500)),
             include_inactive=include_inactive,
         )
+    items = rag._dedupe(items)
     normalized_query = (query or q or "").strip().lower()
     if normalized_query:
         items = [
