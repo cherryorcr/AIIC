@@ -67,15 +67,21 @@ FastAPI route
 
 ### 3.2 会话状态机
 
+当前实现持久化三个会话状态；创建与评分是同步过程，不单独落库：
+
 | 状态 | 进入条件 | 可执行动作 | 离开条件 |
 | --- | --- | --- | --- |
-| `created` | 会话记录建立 | 生成首题、查看匹配 | 首题可用后进入 `questioning` |
-| `questioning` | 有当前题 | 查看题目、提交回答、跳过 | 提交后进入 `evaluating` |
-| `evaluating` | Turn 已保存 | 模型评价、代码运行结果合并 | Feedback 保存后进入 `follow_up` 或 `questioning` |
-| `follow_up` | 当前题有追问 | 回答追问、重答原题 | 追问结束后进入 `questioning` 或 `completed` |
-| `completed` | 用户结束或无下一题 | 查看报告、历史 | 不再推进当前题 |
+| `questioning` | 会话创建成功且首题可用（创建与首题生成在同一请求内同步完成） | 查看题目、提交回答、`/advance` 换根题、`/match` 重新召回 | 评分后若下一题为追问则进入 `follow_up` |
+| `follow_up` | 当前题为追问（`is_follow_up=true`，题目 ID 形如 `{root_id}-f{depth}`） | 回答追问、以 `revision_of` 重答/补充原题 | 回答后回到 `follow_up` 或 `questioning`；`/complete` 进入 `completed` |
+| `completed` | 用户调用 `/complete` | 查看报告、历史 | 终态 |
 
-重答不会将游标退回原题：以 `revision_of` 建立父子 Turn 关系，评价仍使用原题 Rubric。
+补充语义：
+
+- 追问永远延续当前题目主题；换根题必须显式调用 `POST /sessions/{id}/advance`。模型给出的追问若未锚定回答证据，服务端会自动补充“围绕你刚才提到的……”前缀；无模型时按证据/改进点生成确定性追问，题库静态 `follow_ups` 仅作最终兜底。
+- 重答不会将游标退回原题：以 `revision_of` 建立父子 Turn（`parent_turn_id` + `answer_mode`），评价仍使用原题 Rubric，且携带原回答上下文。
+- 每次评分后服务端以固定 ID `report-{session_id}` upsert 报告快照；`/complete` 生成终版，零回答会话不生成报告。
+- 回答提交幂等：同一 (session, question) 已有评分 Turn 时重放请求直接返回持久化结果。
+- 群面：评分反馈经 `_normalize_group_feedback` 保证 2-3 位不同人设队友发言；`POST /group/advance` 在用户不发言时让队友自主推进讨论（禁止同一队友连续发言，`next_delay_seconds` 钳制在 4-20 秒），发言持久化到 `group_messages` 并在会话恢复时回放。
 
 ### 3.3 GraphRAG 详细流程
 
@@ -122,11 +128,13 @@ await router.complete(
 
 处理顺序：
 
-1. 根据 task 选择 provider 列表；当前配置包含 local 和 strong 两类 OpenAI-compatible endpoint。
-2. 发送带超时的请求，针对网络错误、429、5xx 执行有限重试和退避。
+1. 根据 task 选择 provider 列表；当前配置包含 local 和 strong 两类 OpenAI-compatible endpoint。抽取、embedding、rerank、简单评分和出题（`extract/embed/rerank/simple_evaluate/question`）本地优先；评分、匹配打分、简历解析强模型优先，另一方为 fallback。
+2. 发送带超时的请求，仅对瞬态错误（408/425/429/5xx、超时、网络错误）执行有限重试和指数退避（0.25s×2^n，封顶 5s，每 provider 最多 `MODEL_MAX_RETRIES`+1 次）；401/403 等确定性失败立即切换下一 provider，避免拖垮浏览器超时。
 3. 记录 provider、model、route、耗时、tokens、状态、错误名和 fallback 原因。
 4. 对结构化输出执行 JSON 解析和一次 repair；失败时返回 `ok=false`，由领域服务提供确定性 fallback。
 5. 健康检查返回 provider 状态和最后错误，不阻塞业务服务启动。
+
+实现细节：JSON 处理分三段（剥 markdown 围栏 → 修复尾逗号/单引号 dict → schema 校验，`jsonschema` 缺失时使用内置迷你校验器）；匹配打分 schema 同时兼容英文平铺、英文嵌套和中文键三种模型输出形状；local provider 为 Qwen3 系列时通过 `chat_template_kwargs` 关闭思维链外露。`embed()`（/embeddings）与 `rerank()`（/rerank，失败时退化为词法交集打分）已实现但当前主业务链路未调用，属预留能力。每次调用（含失败与兜底）写入 `model_invocations` 遥测（latency/tokens/cost_usd/attempt/fallback_reason）。
 
 ### 3.6 评价结果约束
 
@@ -173,7 +181,8 @@ await router.complete(
 配置来源为环境变量，参考 `.env.example` 和 `backend/.env.example`：
 
 - `DATABASE_URL`：生产 PostgreSQL DSN。
-- `INTERVIEW_DATASET_PATH`：活动题库路径，默认 `approved-dataset.json`。
+- `INTERVIEW_DATASET_PATH`：活动题库路径。代码默认（`config.py`）与生产 Compose 均为 `data/approved-dataset.json`；`backend/.env.example` 中的示例值仍指向 `mock-interview-dataset.json`，仅用于无外部数据依赖的最小开发演示，正式开发建议改为 approved 数据集。
+- `DATABASE_POOL_SIZE`：配置项存在但当前实现未使用连接池（SQLite 单连接 + 锁；PostgreSQL 单连接），为后续扩展预留。
 - `LOCAL_MODEL_*`、`STRONG_MODEL_*`：模型网关地址、模型名和服务端密钥。
 - `MODEL_TIMEOUT_SECONDS`、`MODEL_MAX_RETRIES`：模型请求策略。
 - `AUTH_COOKIE_SECURE`、`AUTH_SESSION_DAYS`：会话 Cookie 策略。

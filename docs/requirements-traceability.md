@@ -25,6 +25,9 @@
 | FR-15 | 系统统一路由本地/强模型并记录 fallback | UC-14 | `ModelRouter`、`model_invocations` | `test_model_fallback_is_recorded_with_telemetry` | implemented |
 | FR-16 | 反馈只能引用用户原回答证据 | UC-07 | Prompt/schema/fallback 约束 | 人工评测集待建立 | needs_validation |
 | FR-17 | 所有公开数据保留来源和许可 | UC-11/13 | approved dataset、sources | `report-source.md`、导入校验 | implemented |
+| FR-18 | 用户可参与群面模拟讨论（AI 队友、自主推进、节奏控制） | UC-15 | `interview.py` 群面逻辑、`/group/advance`、`group_messages` | `test_group_session_generates_peer_reactions`、自主推进测试 | implemented |
+| FR-19 | 匹配评分持久化为不可变快照，避免重复付费调用 | UC-05 | `matching.py`、`match_snapshots` | 快照缓存/不可变/失效系列测试 | implemented |
+| FR-20 | 强模型可结合简历与 JD 生成可溯源的个性化题目 | UC-05/06 | `matching.py` personalized_questions、`interview.py` `_personalize_question` | 个性化溯源测试 | implemented |
 
 ## 3. 非功能需求
 
@@ -43,9 +46,12 @@
 
 | 交付物 | 覆盖需求 |
 | --- | --- |
-| `docs/use-case-design.md` | FR-01 至 FR-17 的用户行为和异常流程 |
+| `docs/use-case-design.md` | FR-01 至 FR-20 的用户行为和异常流程 |
 | `docs/system-overview-design.md` | NFR-02、NFR-03、NFR-06、NFR-08 |
 | `docs/system-detailed-design.md` | FR-05 至 FR-15、NFR-01 至 NFR-05 |
 | `docs/api-design.md` | 前后端接口字段、状态和兼容策略 |
 | `docs/test-plan.md` | 功能、契约、安全、性能和用户验收 |
 | `docs/product-memo.md` | 需求假设、范围、迭代原因和下一步验证 |
+| `docs/architecture-diagrams.md` | 架构、部署与关键时序的图形化视图 |
+| `docs/ui-prototype.md` | 前端页面原型、界面区块和交互流程 |
+| `docs/performance-test-plan.md` | NFR-07 的性能测试方案与基线记录 |

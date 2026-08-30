@@ -2,9 +2,9 @@
 
 ## 现状
 
-后端现在使用 SQLite 作为零配置的 MVP 数据库，文件默认位于 `data/app.db`。应用启动时会执行幂等建表/迁移，并把 `data/mock-interview-dataset.json` 中的题目、技能、来源和图关系写入数据库。题目在运行时从数据库读取，因此修改题库后不需要重新编译前端。
+后端默认使用 SQLite 作为零配置的开发数据库，文件默认位于 `data/app.db`；设置 `DATABASE_URL` 后运行时切换到 PostgreSQL（同一 `Database` 仓储接口）。应用启动时会执行幂等建表/迁移，并把 `INTERVIEW_DATASET_PATH` 指向的数据集（默认 `data/approved-dataset.json`）中的题目、技能、来源和图关系写入数据库。题目在运行时从数据库读取，因此修改题库后不需要重新编译前端。
 
-当前随仓库提供的是 **9 条合成示例题**，来源类型为 `synthetic_mock`，不是已经采集的真实面试原文。真实题目接入前必须补齐来源 URL、许可证、访问时间和脱敏状态，不能把合成题标记为高频或真实统计。
+当前活动题库为 **31 条公开来源题目**（`dataset_status: approved_public_transformed`）：行为面题来自 MIT 许可的 `yangshun/tech-interview-handbook` 公开汇总，算法/技术面题为基于其题名和主题的自行转写，每条保留 URL、许可证、版本、访问时间、`content_hash`、脱敏与可再分发标记。早期的 9 条 `synthetic_mock` 合成示例题已在数据库中软删除（`is_active=0`）保留审计；群面讨论题为应用自有 `synthetic_mock` 内置项，数据集缺失时也不会丢失。真实题目接入前必须补齐来源 URL、许可证、访问时间和脱敏状态，不能把合成题标记为高频或真实统计。
 
 ## 核心表
 
@@ -27,6 +27,8 @@
 | `match_snapshots` | 简历与 JD 的固定评分快照 | 用户、目标岗位、输入指纹、评分版本、分数、模型/规则来源及解释 |
 | `question_favorites` | 用户收藏题目 | 用户 ID、题目 ID、收藏时间 |
 | `reports` | 训练报告快照 | 用户/会话、报告标题、结构化报告 JSON |
+| `group_messages` | 群面模拟队友的自主发言 | 会话 ID、发言者与角色、讨论阶段、下次发言间隔、生成 provider |
+| `candidate_documents` | 简历/JD 上传解析记录 | 用户 ID、文档类型、提取文本、AI 解析草稿、状态（uploaded/parsed/confirmed/failed）、关联资源 ID |
 
 题目删除采用软删除（`questions.is_active=0`），避免破坏历史会话和反馈；重新导入同一个 ID 会自动恢复启用。
 
@@ -61,7 +63,7 @@ POST   /api/v1/admin/knowledge/reload?prune=false
 - PostgreSQL 基线迁移脚本位于 `backend/migrations/001_postgres_schema.sql`，可通过
   `python backend/scripts/migrate_postgres.py --database-url "$DATABASE_URL"` 执行；若要
   迁移既有 SQLite 数据，再加 `--sqlite-path data/app.db`。
-  SQLite 运行时仍由 `Database.init()` 自动执行版本 1–7 的幂等迁移；因此可以先用
+  SQLite 运行时仍由 `Database.init()` 自动执行版本 1–8 的幂等迁移（v8 引入群面 `group_messages` 表）；因此可以先用
   SQLite 开发，再切换到 PostgreSQL，而不改变 API 层的数据契约。
 - 备份至少包含 `app.db` 和题库 JSON；恢复后调用 `POST /api/v1/admin/knowledge/reload` 校验统计数。
 - API key、管理员 token 和 SSH 密码只通过部署环境变量/密钥管理注入，禁止写入数据库或仓库。
@@ -76,7 +78,8 @@ POST   /api/v1/admin/knowledge/reload?prune=false
 
 ## GraphRAG 与真实数据导入
 
-当前题库仍是明确标注的 `synthetic_mock` 演示数据。运行时召回由场景/岗位/技能
+当前活动题库为已核验许可的公开来源转写数据（见 `docs/report-source.md`），早期
+`synthetic_mock` 演示数据已软删除。运行时召回由场景/岗位/技能
 关系过滤、关键词匹配和无依赖哈希向量余弦相似度组成；配置本地模型后，
 `ModelRouter.embed()` 可用于替换为真实 embedding 服务。题目导入 CLI 会做题面
 去重、内容 hash、来源 URL/许可证检查和访问时间记录：
