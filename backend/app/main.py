@@ -319,7 +319,7 @@ def confirm_candidate_document(
     document = db.get_candidate_document(document_id)
     if document is None or document.get("user_id") != uid:
         raise HTTPException(status_code=404, detail="document_not_found")
-    reviewed = payload.parsed or payload.data or {}
+    reviewed = payload.parsed or {}
     if not isinstance(reviewed, dict):
         raise HTTPException(status_code=422, detail="parsed_payload_invalid")
     kind = str(document.get("kind"))
