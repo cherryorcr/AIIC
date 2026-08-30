@@ -84,6 +84,14 @@ def evaluation_prompt(
                     "message": "一段模拟队友发言",
                     "prompt": "要求候选人回应的动作",
                 },
+                "group_reactions": [
+                    {
+                        "speaker": "模拟队友A/B/C",
+                        "role": "推进者/数据派/质疑者",
+                        "message": "每人一段简短发言",
+                        "prompt": "候选人下一步回应动作",
+                    }
+                ],
             }
         )
     return [
@@ -91,7 +99,7 @@ def evaluation_prompt(
             "role": "system",
             "content": (
                 "你是结构化面试评分器。不得补写用户没有说过的事实；缺失证据必须明确指出。只输出合法 JSON。"
-                + ("群面还要模拟一名队友的简短发言，并给出候选人下一步应回应的动作。" if mode == "group" else "")
+                + ("群面还要模拟 2-3 名角色不同的队友各一段简短发言，并给出候选人下一步应回应的动作；同时保留 group_reaction 作为第一名队友兼容字段。" if mode == "group" else "")
             ),
         },
         {"role": "user", "content": json.dumps({"input": payload, "output_schema": schema}, ensure_ascii=False)},

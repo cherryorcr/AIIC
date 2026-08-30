@@ -201,6 +201,13 @@ export type Feedback = {
     prompt?: string;
     [key: string]: unknown;
   } | null;
+  group_reactions?: Array<{
+    speaker?: string;
+    role?: string;
+    message?: string;
+    prompt?: string;
+    [key: string]: unknown;
+  }>;
 };
 
 export type TurnResponse = {

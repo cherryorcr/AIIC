@@ -1,5 +1,7 @@
 # 面试陪练 MVP 共享契约
 
+> 本文件保留前端和后端已使用的最小共享字段及历史接口。完整的资源列表、错误码、版本策略和示例见 `docs/api-design.md`；用例和状态机见 `docs/use-case-design.md` 与 `docs/system-detailed-design.md`。
+
 ## 用户与工作区
 
 ```text

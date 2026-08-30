@@ -16,6 +16,8 @@ AIIC（AI Interview Coach）是一个面向求职者的场景化 AI 面试陪练
 
 `data/approved-dataset.json` 是当前活动题库：行为面题来自 MIT 许可的 Tech Interview Handbook 公开汇总，算法/系统设计题为基于其题名和主题的自行转写。它们不是公司官方题库或频次统计；LeetCode 原题正文和答案没有复制。`data/mock-interview-dataset.json` 与问卷样例仍明确标记为 `synthetic_mock`，仅用于历史审计和开发演示。所有外部数据必须记录来源 URL、许可证、访问时间、版本和脱敏状态。
 
+项目设计与交付边界见：`docs/document-index.md`、`docs/product-memo.md`、`docs/use-case-design.md`、`docs/system-overview-design.md`、`docs/system-detailed-design.md`、`docs/api-design.md`、`docs/test-plan.md`、`docs/requirements-traceability.md` 和 `docs/adr.md`。Product Memo 明确区分已确认的需求输入、`synthetic_mock` 样例与尚待完成的真实用户研究，不把模拟数据描述为真实访谈。
+
 ## 本地运行
 
 ### 后端
@@ -58,7 +60,7 @@ docker compose -f compose.cpu.yml up -d --build
 backend/   FastAPI、模型路由、GraphRAG、算法沙箱和测试
 frontend/  React/TypeScript/Vite 前端
 data/      approved 公开题库、合成题库、问卷样例和在线数据来源台账
-docs/      API 契约、研究计划和数据库设计
+docs/      产品备忘录、用例、概要/详细设计、API、测试、追踪、决策、研究、数据库和部署文档
 ```
 
 ## 重要限制

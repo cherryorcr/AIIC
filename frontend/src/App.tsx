@@ -121,6 +121,14 @@ type Question = {
   backend?: BackendQuestion;
 };
 
+type ConversationMessage = {
+  id: string;
+  kind: "assistant" | "user" | "peer";
+  speaker: string;
+  role?: string;
+  content: string;
+};
+
 const modeMeta: ModeMeta[] = [
   {
     id: "technical",
@@ -851,6 +859,8 @@ function PracticePage() {
   const [panelsSwapped, setPanelsSwapped] = useState(false);
   const [algorithmSubmitted, setAlgorithmSubmitted] = useState(false);
   const [feedback, setFeedback] = useState<BackendFeedback | null>(null);
+  const [conversation, setConversation] = useState<ConversationMessage[]>([]);
+  const [groupPaused, setGroupPaused] = useState(false);
   const [lastTurnId, setLastTurnId] = useState<string | null>(null);
   const [revisionOf, setRevisionOf] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
@@ -874,6 +884,8 @@ function PracticePage() {
     setPanelsSwapped(false);
     setAlgorithmSubmitted(false);
     setFeedback(null);
+    setConversation([]);
+    setGroupPaused(false);
     setLastTurnId(null);
     setRevisionOf(null);
     setNextQuestionData(null);
@@ -912,11 +924,23 @@ function PracticePage() {
           setActiveMode(sessionMode as ModeId);
         }
         const current = (persisted as SessionSummary).current_question as BackendQuestion | null | undefined;
-        setQuestion(current ? backendQuestionToQuestion(current, sessionMode as ModeId, fallback) : questionFromStart(data as StartSessionResponse, sessionMode as ModeId));
+        const initialQuestion = current ? backendQuestionToQuestion(current, sessionMode as ModeId, fallback) : questionFromStart(data as StartSessionResponse, sessionMode as ModeId);
+        setQuestion(initialQuestion);
+        setConversation([
+          {
+            id: `assistant-${initialQuestion.id}-${Date.now()}`,
+            kind: "assistant",
+            speaker: getModeLabel(sessionMode as ModeId),
+            content: initialQuestion.prompt,
+          },
+        ]);
         setQuestionIndex(0);
       } else {
         setSessionId(null);
         setError("后端暂不可用，当前显示演示题；启动 FastAPI 后会自动联调。");
+        setConversation([
+          { id: `assistant-fallback-${Date.now()}`, kind: "assistant", speaker: mode.label, content: fallback.prompt },
+        ]);
       }
       if (healthResult.status === "fulfilled") setModelOnline(Boolean(healthResult.value.status === "ok"));
       else setModelOnline(false);
@@ -954,12 +978,14 @@ function PracticePage() {
     }
   }
   function nextQuestion(completeWhenDone = true) {
-    if (completeWhenDone && !nextQuestionData && sessionId) {
+    const pendingQuestion = nextQuestionData;
+    if (completeWhenDone && !pendingQuestion && sessionId) {
       void finishSession();
       return;
     }
     const fallback = questions.find((item) => item.mode === activeMode) || questions[0];
-    setQuestion(nextQuestionData || fallback);
+    const selectedQuestion = pendingQuestion || fallback;
+    setQuestion(selectedQuestion);
     setNextQuestionData(null);
     setQuestionIndex((index) => index + 1);
     setSubmitted(false);
@@ -968,6 +994,12 @@ function PracticePage() {
     setFeedback(null);
     setRunResult(null);
     setAnswer("");
+    if (!pendingQuestion && activeMode !== "algorithm") {
+      setConversation((current) => [
+        ...current,
+        { id: `assistant-${selectedQuestion.id}-${Date.now()}`, kind: "assistant", speaker: mode.label, content: selectedQuestion.prompt },
+      ]);
+    }
   }
   function supplementAnswer() {
     if (!lastTurnId || !answer.trim()) return;
@@ -981,6 +1013,8 @@ function PracticePage() {
   }
   async function submitAnswer() {
     if (answer.trim().length < 8 || !sessionId || submitting) return;
+    const answerText = answer.trim();
+    const wasRevision = Boolean(revisionOf);
     setSubmitting(true);
     setError("");
     try {
@@ -994,7 +1028,36 @@ function PracticePage() {
       setSubmitted(true);
       setLastTurnId(result.turn_id);
       setRevisionOf(null);
-      setNextQuestionData(result.next_question ? backendQuestionToQuestion(result.next_question, activeMode, question) : null);
+      const next = result.next_question ? backendQuestionToQuestion(result.next_question, activeMode, question) : null;
+      setNextQuestionData(next);
+      setConversation((current) => {
+        const messages: ConversationMessage[] = [
+          ...current,
+          { id: `user-${result.turn_id}`, kind: "user", speaker: "我", content: answerText },
+        ];
+        // A revision receives the same cursor; do not duplicate the current
+        // prompt. A normal answer advances the chat with the model's follow-up.
+        if (next && (!wasRevision || next.id !== question.id)) {
+          messages.push({ id: `assistant-${next.id}-${result.turn_id}`, kind: "assistant", speaker: mode.label, content: next.prompt });
+        }
+        const reactions = result.feedback.group_reactions?.length
+          ? result.feedback.group_reactions
+          : result.feedback.group_reaction
+            ? [result.feedback.group_reaction]
+            : [];
+        reactions.forEach((reaction, index) => {
+          if (reaction.message) {
+            messages.push({
+              id: `peer-${result.turn_id}-${index}`,
+              kind: "peer",
+              speaker: reaction.speaker || `模拟队友 ${String.fromCharCode(65 + index)}`,
+              role: reaction.role,
+              content: reaction.message,
+            });
+          }
+        });
+        return messages;
+      });
       if (!result.next_question) setSessionCompleted(false);
     } catch (cause) {
       // If the browser lost the response after the server committed the turn,
@@ -1155,6 +1218,7 @@ function PracticePage() {
         </div>
       ) : null}
       <div className={`${activeMode === "algorithm" ? "practice-grid algorithm-grid" : "practice-grid"}${panelsSwapped ? " panels-swapped" : ""}`}>
+        {activeMode === "algorithm" ? (
         <div className="question-panel">
           <div className="question-panel-head">
             <div>
@@ -1243,6 +1307,24 @@ function PracticePage() {
             </div>
           ) : null}
         </div>
+        ) : (
+          <ConversationPanel
+            mode={mode.label}
+            activeMode={activeMode}
+            question={question}
+            conversation={conversation}
+            answer={answer}
+            setAnswer={setAnswer}
+            submitted={submitted}
+            submitting={submitting}
+            revisionOf={revisionOf}
+            nextQuestionData={nextQuestionData}
+            groupPaused={groupPaused}
+            onToggleGroupPause={() => setGroupPaused((paused) => !paused)}
+            onSubmit={submitAnswer}
+            onNext={nextQuestion}
+          />
+        )}
         {activeMode === "algorithm" ? (
           <CodeEditor code={code} setCode={setCode} running={running} runResult={runResult} onRun={runCode} />
         ) : (
@@ -1267,6 +1349,98 @@ function PracticePage() {
         )}
       </div>
     </div>
+  );
+}
+
+function ConversationPanel({
+  mode,
+  activeMode,
+  question,
+  conversation,
+  answer,
+  setAnswer,
+  submitted,
+  submitting,
+  revisionOf,
+  nextQuestionData,
+  groupPaused,
+  onToggleGroupPause,
+  onSubmit,
+  onNext,
+}: {
+  mode: string;
+  activeMode: ModeId;
+  question: Question;
+  conversation: ConversationMessage[];
+  answer: string;
+  setAnswer: (value: string) => void;
+  submitted: boolean;
+  submitting: boolean;
+  revisionOf: string | null;
+  nextQuestionData: Question | null;
+  groupPaused: boolean;
+  onToggleGroupPause: () => void;
+  onSubmit: () => void;
+  onNext: () => void;
+}) {
+  return (
+    <section className={`conversation-panel ${activeMode === "group" ? "group-conversation" : ""}`}>
+      <div className="conversation-head">
+        <div>
+          <span className="eyebrow">{activeMode === "group" ? "群面讨论" : "连续面试对话"}</span>
+          <h3>{question.title}</h3>
+          <small>{question.personalized ? "已结合岗位 JD 和你的简历生成" : `围绕一个选题展开多轮回答 · ${mode}`}</small>
+        </div>
+        {activeMode === "group" ? (
+          <button className={`secondary-button group-pause-button ${groupPaused ? "active" : ""}`} type="button" onClick={onToggleGroupPause} aria-pressed={groupPaused}>
+            {groupPaused ? "继续讨论" : "暂停队友"}
+          </button>
+        ) : null}
+      </div>
+      <div className="chat-thread" aria-live="polite">
+        {conversation.map((message) => (
+          <div className={`chat-message chat-message-${message.kind}`} key={message.id}>
+            <div className="chat-avatar">{message.kind === "user" ? "我" : message.kind === "peer" ? message.speaker.slice(-1) : "AI"}</div>
+            <div className="chat-message-body">
+              <div className="chat-message-meta">
+                <strong>{message.speaker}</strong>
+                {message.role ? <span>{message.role}</span> : null}
+              </div>
+              <p>{message.content}</p>
+            </div>
+          </div>
+        ))}
+        {submitting ? (
+          <div className="chat-typing"><span /> <span /> <span /> 模型正在整理下一步问题…</div>
+        ) : null}
+      </div>
+      {nextQuestionData && submitted ? (
+        <button className="chat-next-button" type="button" onClick={onNext}>
+          <MessageSquareText size={15} /> 继续回答模型追问
+        </button>
+      ) : null}
+      <div className="chat-composer">
+        <div className="chat-composer-head">
+          <label htmlFor="answer">{revisionOf ? "修改上一轮回答" : groupPaused && activeMode === "group" ? "暂停中，你的回应" : "你的回答"}</label>
+          <span>{answer.length} 字</span>
+        </div>
+        {revisionOf ? <div className="revision-notice" role="status"><RotateCcw size={14} /><span>提交后会保留原回答，并生成新的反馈。</span></div> : null}
+        <textarea
+          id="answer"
+          className="chat-input"
+          value={answer}
+          onChange={(event) => setAnswer(event.target.value)}
+          disabled={submitted || submitting}
+          placeholder={activeMode === "group" ? "回应队友观点，推进讨论或提出新的判断依据…" : activeMode === "stress" ? "先说结论，再给一个事实。注意控制在 30 秒内…" : "继续回答当前问题，模型会在右侧给出建议并在中间追问…"}
+        />
+        <div className="chat-composer-actions">
+          <span><CircleHelp size={14} /> {submitted ? "可在右侧选择修改或进入追问" : "回答提交后会保留在对话中"}</span>
+          <button className="primary-button" type="button" disabled={answer.trim().length < 8 || submitted || submitting} onClick={onSubmit}>
+            {submitting ? <><Gauge size={16} className="spin" /> 分析中…</> : <><Send size={16} /> 发送回答</>}
+          </button>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -1376,6 +1550,7 @@ const scoreLabel: Record<string, string> = {
 function FeedbackPanel({ submitted, feedback, question, onRetry, onSupplement, onNext }: { submitted: boolean; feedback: BackendFeedback | null; question: Question; onRetry: () => void; onSupplement?: () => void; onNext: () => void }) {
   const scoreEntries = feedback ? Object.entries(feedback.scores) : [];
   const average = scoreEntries.length ? Math.round((scoreEntries.reduce((sum, [, value]) => sum + Number(value), 0) / scoreEntries.length) * 20) : 0;
+  const groupReactions = feedback?.group_reactions?.length ? feedback.group_reactions : feedback?.group_reaction ? [feedback.group_reaction] : [];
   return (
     <aside className={`feedback-panel ${submitted ? "feedback-visible" : ""}`}>
       <div className="feedback-head">
@@ -1429,15 +1604,19 @@ function FeedbackPanel({ submitted, feedback, question, onRetry, onSupplement, o
               <strong>{feedback.next_question || question.followUp}</strong>
             </div>
           ) : null}
-          {feedback.group_reaction ? (
+          {groupReactions.length ? (
             <div className="group-reaction-card">
               <div className="group-reaction-head">
-                <span>模拟队友发言{feedback.group_phase ? ` · ${feedback.group_phase}` : ""}</span>
-                <strong>{feedback.group_reaction.speaker || "模拟队友"}</strong>
+                <span>模拟队友讨论{feedback.group_phase ? ` · ${feedback.group_phase}` : ""}</span>
+                <strong>{groupReactions.length} 位队友</strong>
               </div>
-              {feedback.group_reaction.role ? <small>{feedback.group_reaction.role}</small> : null}
-              <p>{feedback.group_reaction.message || "请回应队友观点并推动小组形成共识。"}</p>
-              {feedback.group_reaction.prompt ? <strong className="group-reaction-prompt">下一步：{feedback.group_reaction.prompt}</strong> : null}
+              {groupReactions.map((reaction, index) => (
+                <div className="group-reaction-message" key={`${reaction.speaker || "peer"}-${index}`}>
+                  <div><strong>{reaction.speaker || `模拟队友 ${String.fromCharCode(65 + index)}`}</strong>{reaction.role ? <small>{reaction.role}</small> : null}</div>
+                  <p>{reaction.message || "请回应队友观点并推动小组形成共识。"}</p>
+                  {reaction.prompt ? <strong className="group-reaction-prompt">下一步：{reaction.prompt}</strong> : null}
+                </div>
+              ))}
             </div>
           ) : null}
           <div className="feedback-actions">

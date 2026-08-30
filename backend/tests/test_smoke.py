@@ -86,6 +86,7 @@ def test_group_interview_returns_simulated_reaction():
         feedback = answered.json()["feedback"]
         assert feedback["group_phase"]
         assert feedback["group_reaction"]["speaker"]
+        assert 2 <= len(feedback["group_reactions"]) <= 3
         assert set(feedback["scores"]) == {"problem_framing", "collaboration", "consensus", "time_management"}
 
 

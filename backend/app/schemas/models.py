@@ -220,6 +220,7 @@ class Feedback(BaseModel):
     # response gives the candidate a concrete next interaction to address.
     group_phase: str | None = None
     group_reaction: dict[str, Any] | None = None
+    group_reactions: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class TurnResponse(BaseModel):

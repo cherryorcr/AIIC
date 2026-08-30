@@ -35,6 +35,7 @@ def feedback_schema(mode: str) -> dict[str, Any]:
             "source_refs": {"type": "array", "items": {"type": "string"}},
             "group_phase": {"type": "string"},
             "group_reaction": {"type": "object"},
+            "group_reactions": {"type": "array", "items": {"type": "object"}, "maxItems": 3},
         },
         "additionalProperties": True,
     }
@@ -200,6 +201,13 @@ class InterviewService:
             parsed = self.router.parse_json(generated.get("text", ""))
             if parsed:
                 feedback.update({key: parsed[key] for key in feedback.keys() if key in parsed})
+        # A hosted model may return only one simulated participant even though
+        # the group-interview contract asks for 2-3 distinct voices. Keep all
+        # model-generated reactions and deterministically fill the missing
+        # roles so the UI always presents a real discussion, including when
+        # the provider is partially degraded.
+        if session["mode"] == "group":
+            feedback = self._normalize_group_feedback(feedback)
         feedback = Feedback.model_validate(feedback).model_dump()
         self.db.save_feedback(turn_id, feedback)
 
@@ -339,15 +347,68 @@ class InterviewService:
             "source_refs": [],
         }
         if mode == "group":
+            reactions = [
+                {
+                    "speaker": "模拟队友 A",
+                    "role": "推进者",
+                    "message": "我同意先统一目标，但建议把资源约束量化后再比较方案。",
+                    "prompt": "请回应队友并推动小组形成一个可执行的判断标准。",
+                },
+                {
+                    "speaker": "模拟队友 B",
+                    "role": "质疑者",
+                    "message": "这个判断标准是否忽略了交付风险？我们需要一个可验证的优先级依据。",
+                    "prompt": "请处理分歧，并让小组在限定时间内继续推进。",
+                },
+            ]
             result.update(
                 {
                     "group_phase": "观点陈述",
-                    "group_reaction": {
-                        "speaker": "模拟队友 A",
-                        "role": "推进者",
-                        "message": "我同意先统一目标，但建议把资源约束量化后再比较方案。",
-                        "prompt": "请回应队友并推动小组形成一个可执行的判断标准。",
-                    },
+                    "group_reaction": reactions[0],
+                    "group_reactions": reactions,
                 }
             )
         return result
+
+    @staticmethod
+    def _normalize_group_feedback(feedback: dict[str, Any]) -> dict[str, Any]:
+        """Guarantee 2-3 participant reactions for every group turn."""
+        defaults = [
+            {
+                "speaker": "模拟队友 A",
+                "role": "推进者",
+                "message": "我同意先统一目标，但建议把资源约束量化后再比较方案。",
+                "prompt": "请回应队友并推动小组形成一个可执行的判断标准。",
+            },
+            {
+                "speaker": "模拟队友 B",
+                "role": "质疑者",
+                "message": "这个判断标准是否忽略了交付风险？我们需要一个可验证的优先级依据。",
+                "prompt": "请处理分歧，并让小组在限定时间内继续推进。",
+            },
+            {
+                "speaker": "模拟队友 C",
+                "role": "数据派",
+                "message": "我建议补充一个可量化的成功指标，并明确用什么数据验证结论。",
+                "prompt": "请把讨论收敛成指标、负责人和下一步行动。",
+            },
+        ]
+        raw = feedback.get("group_reactions")
+        reactions = raw if isinstance(raw, list) else []
+        if not reactions and isinstance(feedback.get("group_reaction"), dict):
+            reactions = [feedback["group_reaction"]]
+        normalized: list[dict[str, Any]] = []
+        for item in reactions[:3]:
+            if isinstance(item, dict) and str(item.get("message") or "").strip():
+                normalized.append(item)
+        used_speakers = {str(item.get("speaker") or "").strip() for item in normalized}
+        for default in defaults:
+            if len(normalized) >= 2:
+                break
+            if default["speaker"] not in used_speakers:
+                normalized.append(default)
+                used_speakers.add(default["speaker"])
+        feedback["group_reactions"] = normalized[:3]
+        feedback["group_reaction"] = normalized[0] if normalized else defaults[0]
+        feedback.setdefault("group_phase", "观点陈述")
+        return feedback
