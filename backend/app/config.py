@@ -29,14 +29,14 @@ class Settings:
     dataset_path: Path = Path(
         os.getenv(
             "INTERVIEW_DATASET_PATH",
-            str(Path(__file__).resolve().parents[2] / "data" / "approved-dataset.json"),
+            str(Path(__file__).resolve().parents[2] / "data" / "mock-interview-dataset.json"),
         )
     )
 
     # 强模型只从环境变量读取密钥，仓库中不保存真实 API key。
     strong_model_base_url: str = os.getenv("STRONG_MODEL_BASE_URL", "https://jojocode.com/v1")
     strong_model_api_key: str = os.getenv("STRONG_MODEL_API_KEY", "")
-    strong_model_name: str = os.getenv("STRONG_MODEL_NAME", "codex-auto-review")
+    strong_model_name: str = os.getenv("STRONG_MODEL_NAME", "gpt-4o-mini")
 
     # 弱模型通过 OpenAI-compatible 网关访问。默认不主动连接，部署时配置地址即可。
     local_model_base_url: str = os.getenv("LOCAL_MODEL_BASE_URL", "")

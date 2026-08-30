@@ -110,8 +110,6 @@ type Question = {
   source: string;
   sourceUrl?: string;
   sourceLicense?: string;
-  sourceConfidence?: string;
-  sourceVersion?: string;
   followUp: string;
   rubric: string[];
   tests?: Array<{
@@ -757,8 +755,6 @@ function backendQuestionToQuestion(
       : fallback?.source || "synthetic_mock",
     sourceUrl: typeof item.source?.url === "string" ? item.source.url : fallback?.sourceUrl,
     sourceLicense: typeof item.source?.license === "string" ? item.source.license : fallback?.sourceLicense,
-    sourceConfidence: item.source_confidence || fallback?.sourceConfidence,
-    sourceVersion: typeof item.source?.version === "string" ? item.source.version : fallback?.sourceVersion,
     followUp: item.follow_ups?.join(" ") || fallback?.followUp || "请补充一个具体事实或结果。",
     rubric: item.rubric?.length ? item.rubric : fallback?.rubric || [],
     tests: item.tests || fallback?.tests,
@@ -786,9 +782,7 @@ function modeFromProcessType(value?: string): ModeId {
 function questionFromKnowledge(item: BackendQuestion): Question {
   const mode = modeFromProcessType(item.process_type);
   const fallback =
-    questions.find(
-      (candidate) => candidate.id === (item.id || item.question_id) && candidate.mode === mode,
-    ) ||
+    questions.find((candidate) => candidate.id === (item.id || item.question_id)) ||
     questions.find((candidate) => candidate.mode === mode);
   return backendQuestionToQuestion(
     {
@@ -850,7 +844,6 @@ function PracticePage() {
   );
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [completing, setCompleting] = useState(false);
   const [error, setError] = useState("");
   const [modelOnline, setModelOnline] = useState(true);
   const mode = modeMeta.find((item) => item.id === activeMode) ?? modeMeta[0];
@@ -928,23 +921,9 @@ function PracticePage() {
       setQuestionIndex(0);
     }
   }
-  async function finishSession() {
-    if (!sessionId || completing) return;
-    setCompleting(true);
-    setError("");
-    try {
-      await completeSession(sessionId);
-      setSessionCompleted(true);
-      setNextQuestionData(null);
-    } catch {
-      setError("结束训练失败，请稍后重试。");
-    } finally {
-      setCompleting(false);
-    }
-  }
   function nextQuestion(completeWhenDone = true) {
     if (completeWhenDone && !nextQuestionData && sessionId) {
-      void finishSession();
+      void completeSession(sessionId).then(() => setSessionCompleted(true)).catch(() => setError("结束训练失败，请稍后重试。"));
       return;
     }
     const fallback = questions.find((item) => item.mode === activeMode) || questions[0];
@@ -974,31 +953,8 @@ function PracticePage() {
           : null,
       );
       if (!result.next_question) setSessionCompleted(false);
-    } catch (cause) {
-      // If the browser lost the response after the server committed the turn,
-      // reconcile from the persisted session before showing an error. This
-      // prevents a transient disconnect from making users submit the same
-      // answer again and hitting question_id_not_current.
-      try {
-        const persisted = await getSessionSummary(sessionId);
-        const persistedTurn = (persisted.turns || []).find(
-          (item) => String(item.question_id || "") === question.id && item.feedback,
-        );
-        if (persistedTurn?.feedback) {
-          setFeedback(persistedTurn.feedback as BackendFeedback);
-          setSubmitted(true);
-          const current = persisted.current_question as BackendQuestion | null | undefined;
-          setNextQuestionData(
-            current ? backendQuestionToQuestion(current, activeMode, question) : null,
-          );
-          setError("");
-          return;
-        }
-      } catch {
-        // Preserve the original error below when reconciliation is unavailable.
-      }
-      const message = cause instanceof Error ? cause.message : "网络请求失败";
-      setError(`提交失败：${message}。回答已保留在当前页面，可稍后重试。`);
+    } catch {
+      setError("提交失败，回答已保留在当前页面，请检查后端服务后重试。");
     } finally {
       setSubmitting(false);
     }
@@ -1141,8 +1097,6 @@ function PracticePage() {
               </a>
             ) : null}
             {question.sourceLicense ? <small>{question.sourceLicense}</small> : null}
-            {question.sourceConfidence ? <small>可信度：{question.sourceConfidence}</small> : null}
-            {question.sourceVersion ? <small>版本：{question.sourceVersion}</small> : null}
           </div>
           {activeMode !== "algorithm" ? (
             <>
@@ -1168,7 +1122,7 @@ function PracticePage() {
                 <button
                   className="primary-button"
                   type="button"
-                  disabled={answer.trim().length < 8 || !sessionId || submitting || submitted}
+                  disabled={answer.trim().length < 8 || !sessionId || submitting}
                   onClick={submitAnswer}
                 >
                   {submitting ? (
@@ -1192,20 +1146,9 @@ function PracticePage() {
                 <strong>判题约束</strong>
                 <span>时间 O(n) · 空间 O(n) · Python 3.11 · 后端固定测试</span>
               </div>
-              <div className="algorithm-actions">
-                <button className="secondary-button" type="button" onClick={() => nextQuestion(false)}>
-                  换一道题 <ArrowRight size={15} />
-                </button>
-                <button
-                  className="primary-button"
-                  type="button"
-                  onClick={() => void finishSession()}
-                  disabled={!sessionId || completing}
-                >
-                  {completing ? "保存报告中..." : "完成训练"}
-                  <CheckCircle2 size={15} />
-                </button>
-              </div>
+              <button className="secondary-button" type="button" onClick={() => nextQuestion(false)}>
+                换一道题 <ArrowRight size={15} />
+              </button>
             </div>
           ) : null}
         </div>
@@ -1806,7 +1749,7 @@ function MatchPage() {
       skills?: string[];
     }>
   >([]);
-  const [profile, setProfile] = useState<UserProfile>(() => loadUserProfile());
+  const [profile] = useState<UserProfile>(() => loadUserProfile());
   const [draftJob, setDraftJob] = useState(
     () => profile.job_text || "Python FastAPI PostgreSQL Redis Docker 系统设计",
   );
@@ -2376,8 +2319,6 @@ function QuestionBankPage() {
                 </a>
               ) : null}
               {selected.sourceLicense ? <small>{selected.sourceLicense}</small> : null}
-              {selected.sourceConfidence ? <small>可信度：{selected.sourceConfidence}</small> : null}
-              {selected.sourceVersion ? <small>版本：{selected.sourceVersion}</small> : null}
             </div>
             <button
               className="primary-button full-button"
