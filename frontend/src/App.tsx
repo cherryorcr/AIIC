@@ -723,23 +723,34 @@ function SessionRow({ session }: { session: DashboardSession }) {
   );
 }
 
+function questionTitleFromPrompt(prompt: string): string {
+  const cleaned = prompt
+    .replace(/\s+/g, " ")
+    .replace(/[（(][^）)]{0,100}(?:依据|source|转载|转写|leetcode)[^）)]*[）)]/gi, "")
+    .trim();
+  const firstClause = cleaned.split(/[。！？!?：:]/, 1)[0]?.trim() || cleaned;
+  if (!firstClause) return "待训练面试题";
+  return firstClause.length > 28 ? `${firstClause.slice(0, 28)}…` : firstClause;
+}
+
 function backendQuestionToQuestion(item: BackendQuestion, mode: ModeId, fallback?: Question): Question {
   const prompt = item.question || fallback?.prompt || "请介绍一个与目标岗位相关的项目。";
+  const sameQuestion = Boolean(fallback && fallback.id === item.question_id);
   return {
     id: item.question_id,
     mode,
-    title: fallback?.title || prompt.slice(0, 28),
+    title: item.title?.trim() || (sameQuestion ? fallback?.title : undefined) || questionTitleFromPrompt(prompt),
     prompt,
-    skills: item.skills?.length ? item.skills : fallback?.skills || [],
-    difficulty: item.difficulty || fallback?.difficulty || "中",
-    source: item.source_refs?.length ? item.source_refs.join(" · ") : fallback?.source || "synthetic_mock",
-    sourceUrl: typeof item.source?.url === "string" ? item.source.url : fallback?.sourceUrl,
-    sourceLicense: typeof item.source?.license === "string" ? item.source.license : fallback?.sourceLicense,
-    sourceConfidence: item.source_confidence || fallback?.sourceConfidence,
-    sourceVersion: typeof item.source?.version === "string" ? item.source.version : fallback?.sourceVersion,
-    followUp: item.follow_ups?.join(" ") || fallback?.followUp || "请补充一个具体事实或结果。",
-    rubric: item.rubric?.length ? item.rubric : fallback?.rubric || [],
-    tests: item.tests || fallback?.tests,
+    skills: item.skills?.length ? item.skills : sameQuestion ? fallback?.skills || [] : [],
+    difficulty: item.difficulty || (sameQuestion ? fallback?.difficulty : undefined) || "中",
+    source: item.source_refs?.length ? item.source_refs.join(" · ") : sameQuestion ? fallback?.source || "synthetic_mock" : "synthetic_mock",
+    sourceUrl: typeof item.source?.url === "string" ? item.source.url : sameQuestion ? fallback?.sourceUrl : undefined,
+    sourceLicense: typeof item.source?.license === "string" ? item.source.license : sameQuestion ? fallback?.sourceLicense : undefined,
+    sourceConfidence: item.source_confidence || (sameQuestion ? fallback?.sourceConfidence : undefined),
+    sourceVersion: typeof item.source?.version === "string" ? item.source.version : sameQuestion ? fallback?.sourceVersion : undefined,
+    followUp: item.follow_ups?.join(" ") || (sameQuestion ? fallback?.followUp : undefined) || "请补充一个具体事实或结果。",
+    rubric: item.rubric?.length ? item.rubric : sameQuestion ? fallback?.rubric || [] : [],
+    tests: item.tests || (sameQuestion ? fallback?.tests : undefined),
     backend: item,
   };
 }

@@ -3,6 +3,7 @@ export type ModeId = "technical" | "algorithm" | "behavioral" | "stress" | "case
 export type BackendQuestion = {
   question_id: string;
   id?: string;
+  title?: string;
   question: string;
   process_type?: string;
   role?: string;
