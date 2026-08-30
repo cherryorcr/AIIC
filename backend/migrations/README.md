@@ -17,4 +17,5 @@ The checked-in `001_postgres_schema.sql` is the production baseline used by
 credentials in the deployment secret store; do not place them in this
 repository or in migration files. The adapter reuses the same repository
 methods (`save_session`, `save_user_profile`, `save_job`, `favorite_question`,
-`save_report`, etc.) without changing API handlers.
+`save_report`, etc.) without changing API handlers. Version 6 adds registered
+account columns plus `auth_sessions`; session tokens are stored only as hashes.

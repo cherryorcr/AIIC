@@ -11,9 +11,29 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL DEFAULT '',
+    email TEXT UNIQUE,
+    password_hash TEXT,
     is_temporary BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL,
-    last_seen_at TIMESTAMPTZ NOT NULL
+    last_seen_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ
+);
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    last_used_at TIMESTAMPTZ NOT NULL,
+    revoked_at TIMESTAMPTZ,
+    user_agent TEXT,
+    ip_address TEXT
 );
 
 CREATE TABLE IF NOT EXISTS user_profiles (
@@ -191,6 +211,7 @@ CREATE INDEX IF NOT EXISTS idx_edges_from ON graph_edges(from_type, from_id);
 CREATE INDEX IF NOT EXISTS idx_favorites_user ON question_favorites(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_candidate_documents_user ON candidate_documents(user_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, expires_at);
 
 INSERT INTO schema_migrations(version, description, applied_at)
 VALUES (1, 'initial interview and knowledge schema', NOW())
@@ -206,4 +227,7 @@ VALUES (4, 'model invocation token, cost and retry telemetry', NOW())
 ON CONFLICT (version) DO NOTHING;
 INSERT INTO schema_migrations(version, description, applied_at)
 VALUES (5, 'candidate resume and job-description documents', NOW())
+ON CONFLICT (version) DO NOTHING;
+INSERT INTO schema_migrations(version, description, applied_at)
+VALUES (6, 'registered accounts and hashed authentication sessions', NOW())
 ON CONFLICT (version) DO NOTHING;

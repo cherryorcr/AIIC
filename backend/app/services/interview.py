@@ -86,7 +86,8 @@ class InterviewService:
             "created_at": now(),
         }
         if session.get("user_id"):
-            self.db.create_temp_user(session["user_id"])
+            if not self.db.get_user(session["user_id"]):
+                self.db.create_temp_user(session["user_id"])
             self.db.save_user_profile(session["user_id"], session["user_profile"])
         self.db.save_session(session)
         return {

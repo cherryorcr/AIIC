@@ -5,7 +5,7 @@ import hashlib
 import sqlite3
 import threading
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -312,9 +312,24 @@ class Database:
                 CREATE TABLE IF NOT EXISTS users (
                     id TEXT PRIMARY KEY,
                     display_name TEXT NOT NULL DEFAULT '',
+                    email TEXT UNIQUE,
+                    password_hash TEXT,
                     is_temporary INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL
+                    last_seen_at TEXT NOT NULL,
+                    updated_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS auth_sessions (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_used_at TEXT NOT NULL,
+                    revoked_at TEXT,
+                    user_agent TEXT,
+                    ip_address TEXT,
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
                 CREATE TABLE IF NOT EXISTS user_profiles (
                     user_id TEXT PRIMARY KEY,
@@ -385,6 +400,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_edges_from ON graph_edges(from_type, from_id);
                 CREATE INDEX IF NOT EXISTS idx_favorites_user ON question_favorites(user_id);
                 CREATE INDEX IF NOT EXISTS idx_candidate_documents_user ON candidate_documents(user_id, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, expires_at);
                 """
             )
             # Databases created by an earlier MVP release already contain the
@@ -397,8 +413,11 @@ class Database:
             self._ensure_column(self._conn, "sessions", "user_id", "TEXT")
             self._ensure_column(self._conn, "sessions", "job_id", "TEXT")
             self._ensure_column(self._conn, "users", "display_name", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(self._conn, "users", "email", "TEXT")
+            self._ensure_column(self._conn, "users", "password_hash", "TEXT")
             self._ensure_column(self._conn, "users", "is_temporary", "INTEGER NOT NULL DEFAULT 1")
             self._ensure_column(self._conn, "users", "last_seen_at", "TEXT")
+            self._ensure_column(self._conn, "users", "updated_at", "TEXT")
             self._ensure_column(self._conn, "user_profiles", "skills_json", "TEXT NOT NULL DEFAULT '[]'")
             self._ensure_column(self._conn, "user_profiles", "projects_json", "TEXT NOT NULL DEFAULT '[]'")
             self._ensure_column(self._conn, "user_profiles", "education", "TEXT")
@@ -416,6 +435,8 @@ class Database:
             self._ensure_column(self._conn, "model_invocations", "attempt", "INTEGER")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_questions_active ON questions(is_active)")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
+            self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, expires_at)")
             self._conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, description, applied_at) VALUES (?, ?, ?)",
                 (1, "initial interview and knowledge schema", utc_now()),
@@ -435,6 +456,10 @@ class Database:
             self._conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, description, applied_at) VALUES (?, ?, ?)",
                 (5, "candidate resume and job-description documents", utc_now()),
+            )
+            self._conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, description, applied_at) VALUES (?, ?, ?)",
+                (6, "registered accounts and hashed authentication sessions", utc_now()),
             )
 
     def seed_questions(self, items: list[dict[str, Any]], *, prune: bool = False) -> int:
@@ -821,14 +846,18 @@ class Database:
                 INSERT INTO users(id, display_name, is_temporary, created_at, last_seen_at)
                 VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
-                    display_name=CASE WHEN excluded.display_name <> '' THEN excluded.display_name ELSE users.display_name END,
-                    is_temporary=excluded.is_temporary,
+                    display_name=CASE
+                        WHEN users.is_temporary = FALSE THEN users.display_name
+                        WHEN excluded.display_name <> '' THEN excluded.display_name
+                        ELSE users.display_name
+                    END,
+                    is_temporary=CASE WHEN users.is_temporary = FALSE THEN FALSE ELSE excluded.is_temporary END,
                     last_seen_at=excluded.last_seen_at
                 """,
                 (uid, display_name or "", bool(is_temporary), now, now),
             )
             row = self._conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
-            return dict(row) if row else {"id": uid, "display_name": display_name, "is_temporary": is_temporary}
+            return self._public_user(dict(row)) if row else {"id": uid, "display_name": display_name, "is_temporary": is_temporary}
 
     # Alias used by API handlers that prefer an explicit name.
     get_or_create_temp_user = create_temp_user
@@ -838,9 +867,125 @@ class Database:
             row = self._conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
             if not row:
                 return None
-            item = dict(row)
-            item["is_temporary"] = bool(item.get("is_temporary"))
-            return item
+            return self._public_user(dict(row))
+
+    @staticmethod
+    def _public_user(item: dict[str, Any]) -> dict[str, Any]:
+        item = dict(item)
+        item.pop("password_hash", None)
+        item["is_temporary"] = bool(item.get("is_temporary"))
+        return item
+
+    def get_user_credentials(self, email: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM users WHERE email = ? AND is_temporary = FALSE", (email,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def register_account(
+        self,
+        email: str,
+        password_hash: str,
+        display_name: str,
+        *,
+        upgrade_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create an account or upgrade the current guest without losing data."""
+        import uuid
+
+        existing = self.get_user_credentials(email)
+        if existing:
+            raise ValueError("email_already_registered")
+        uid = str(upgrade_user_id or f"usr-{uuid.uuid4().hex}")
+        current = self.get_user(uid) if upgrade_user_id else None
+        if current and not current.get("is_temporary"):
+            raise ValueError("account_already_registered")
+        now = utc_now()
+        with self._lock, self._conn:
+            if current:
+                self._conn.execute(
+                    """
+                    UPDATE users SET email = ?, password_hash = ?, display_name = ?,
+                        is_temporary = FALSE, last_seen_at = ?, updated_at = ?
+                    WHERE id = ? AND is_temporary = TRUE
+                    """,
+                    (email, password_hash, display_name, now, now, uid),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    INSERT INTO users
+                    (id, display_name, email, password_hash, is_temporary, created_at, last_seen_at, updated_at)
+                    VALUES (?, ?, ?, ?, FALSE, ?, ?, ?)
+                    """,
+                    (uid, display_name, email, password_hash, now, now, now),
+                )
+        user = self.get_user(uid)
+        if not user:
+            raise RuntimeError("account_creation_failed")
+        return user
+
+    def create_auth_session(
+        self,
+        user_id: str,
+        token_hash: str,
+        *,
+        lifetime_days: int = 30,
+        user_agent: str = "",
+        ip_address: str = "",
+    ) -> dict[str, Any]:
+        import uuid
+
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        expires_at = (now_dt + timedelta(days=max(1, lifetime_days))).isoformat()
+        session_id = f"auth-{uuid.uuid4().hex}"
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO auth_sessions
+                (id, user_id, token_hash, expires_at, created_at, last_used_at, revoked_at, user_agent, ip_address)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                """,
+                (session_id, user_id, token_hash, expires_at, now, now, user_agent[:500], ip_address[:120]),
+            )
+        return {"id": session_id, "user_id": user_id, "expires_at": expires_at}
+
+    def resolve_auth_session(self, token_hash: str) -> dict[str, Any] | None:
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM auth_sessions WHERE token_hash = ? AND revoked_at IS NULL", (token_hash,)
+            ).fetchone()
+            if not row:
+                return None
+            session = dict(row)
+            expires = session.get("expires_at")
+            if isinstance(expires, str):
+                try:
+                    expires = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+                except ValueError:
+                    return None
+            if not isinstance(expires, datetime) or expires <= datetime.now(timezone.utc):
+                self._conn.execute(
+                    "UPDATE auth_sessions SET revoked_at = ? WHERE id = ?", (utc_now(), session["id"])
+                )
+                return None
+            self._conn.execute(
+                "UPDATE auth_sessions SET last_used_at = ? WHERE id = ?", (utc_now(), session["id"])
+            )
+            user = self.get_user(str(session["user_id"]))
+            if not user:
+                return None
+            return {"session": session, "user": user}
+
+    def revoke_auth_session(self, token_hash: str) -> bool:
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE auth_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL",
+                (utc_now(), token_hash),
+            )
+            return cursor.rowcount > 0
 
     def save_user_profile(self, user_id: str, profile: dict[str, Any] | None) -> dict[str, Any]:
         """Upsert a user's skills, projects and free-form profile fields."""

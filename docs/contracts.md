@@ -1,5 +1,17 @@
 # 面试陪练 MVP 共享契约
 
+## 用户与工作区
+
+```text
+POST /api/v1/auth/register  # display_name, email, password；升级当前临时用户
+POST /api/v1/auth/login     # email, password
+POST /api/v1/auth/logout
+GET  /api/v1/auth/me
+GET  /api/v1/workspace/overview
+```
+
+浏览器使用 HttpOnly Cookie，服务端从登录态推导 `user_id`。请求体或 `X-User-Id` 中的用户 ID 不参与授权。未注册用户仍有独立临时工作区；注册后现有资料、岗位和训练历史保留。
+
 ## Session
 
 ```json
@@ -67,4 +79,3 @@
 - 检索无结果：使用自编/有许可的基础题，不展示虚假的来源或频次。
 - ASR 失败：保留文字输入入口。
 - 代码运行超时：终止进程并返回固定提示，不阻塞整场会话。
-

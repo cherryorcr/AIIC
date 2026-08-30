@@ -27,14 +27,14 @@ class SessionCreate(BaseModel):
     job_text: str = ""
     user_profile: UserProfile = Field(default_factory=UserProfile)
     difficulty: Difficulty = "medium"
-    # Optional anonymous-user and saved-JD references.  Existing clients can
-    # omit both fields; the API may create a temporary user automatically.
+    # Kept for wire compatibility only. The server always derives ownership
+    # from the hashed auth session and ignores client-provided user IDs.
     user_id: str | None = None
     job_id: str | None = None
 
 
 class TemporaryUserCreate(BaseModel):
-    """Create or resume a temporary user (no password/auth secret)."""
+    """Create a new isolated temporary user (client IDs are ignored)."""
 
     user_id: str | None = None
     display_name: str = "临时用户"
@@ -46,6 +46,17 @@ class TemporaryUser(BaseModel):
     is_temporary: bool = True
     created_at: str | None = None
     last_seen_at: str | None = None
+
+
+class AccountRegister(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=8, max_length=128)
+    display_name: str = Field(min_length=1, max_length=80)
+
+
+class AccountLogin(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=128)
 
 
 class UserProfileUpdate(BaseModel):
@@ -142,6 +153,7 @@ class FavoriteRecord(BaseModel):
 
 
 class ReportCreate(BaseModel):
+    # Kept for legacy clients; report ownership always comes from auth.
     user_id: str | None = None
     session_id: str | None = None
     title: str = "训练报告"

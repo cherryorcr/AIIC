@@ -20,7 +20,8 @@
 | `question_skills` | 题目-技能多对多关系 | `question_id`、`skill_id` |
 | `graph_edges` | GraphRAG 关系边 | `Question -tests-> Skill` 等关系及来源 |
 | `schema_migrations` | 数据库版本记录 | 版本号、说明、应用时间 |
-| `users` | 临时用户/登录用户主体 | 用户 ID、显示名、临时标记、最近访问时间 |
+| `users` | 临时用户/正式账户主体 | 用户 ID、显示名、规范化邮箱、密码哈希、临时标记、最近访问时间 |
+| `auth_sessions` | 服务端登录态 | 用户 ID、令牌哈希、到期/撤销/最近使用时间、客户端审计信息 |
 | `user_profiles` | 用户技能与项目档案 | 技能、项目经历、教育/经验、约束及扩展 JSON |
 | `jobs` | 用户保存的岗位和 JD | 岗位名称、公司、JD 文本、归一化技能、来源信息 |
 | `question_favorites` | 用户收藏题目 | 用户 ID、题目 ID、收藏时间 |
@@ -59,10 +60,18 @@ POST   /api/v1/admin/knowledge/reload?prune=false
 - PostgreSQL 基线迁移脚本位于 `backend/migrations/001_postgres_schema.sql`，可通过
   `python backend/scripts/migrate_postgres.py --database-url "$DATABASE_URL"` 执行；若要
   迁移既有 SQLite 数据，再加 `--sqlite-path data/app.db`。
-  SQLite 运行时仍由 `Database.init()` 自动执行版本 1–3 的幂等迁移；因此可以先用
+  SQLite 运行时仍由 `Database.init()` 自动执行版本 1–6 的幂等迁移；因此可以先用
   SQLite 开发，再切换到 PostgreSQL，而不改变 API 层的数据契约。
 - 备份至少包含 `app.db` 和题库 JSON；恢复后调用 `POST /api/v1/admin/knowledge/reload` 校验统计数。
 - API key、管理员 token 和 SSH 密码只通过部署环境变量/密钥管理注入，禁止写入数据库或仓库。
+
+## 用户隔离与认证
+
+- 临时用户和正式账户都通过服务端 `auth_sessions` 识别；浏览器只持有 HttpOnly 随机令牌，数据库只保存其 SHA-256 摘要。
+- 密码采用带随机盐的 PBKDF2-SHA256 哈希，不保存明文或可逆密文。
+- 注册会将当前临时用户原地升级，所有以 `user_id` 关联的档案、JD、收藏、文档、会话、回答和报告继续保留。
+- 所有按资源 ID 读取或修改的接口先校验资源的 `user_id`，越权访问统一返回 404；客户端提交的 `user_id` 和 `X-User-Id` 不作为授权依据。
+- 准备度接口仅查询当前用户的 `user_profiles`、`jobs`、`sessions` 和 `reports`，前端本地降级缓存也按用户 ID 命名空间隔离。
 
 ## GraphRAG 与真实数据导入
 

@@ -8,6 +8,7 @@
 - 文字回答、结构化反馈、追问和训练总结
 - Python 算法题受限执行（挑战版）；生产环境应使用独立 runner 主机和更强隔离
 - SQLite 零配置启动，带 schema 迁移、来源台账和题库管理 API；设置 `DATABASE_URL` 后运行时切换到 PostgreSQL
+- 临时用户无感体验，以及可保留现有数据升级的邮箱/密码账户；档案、JD、收藏、会话、回答、准备度和报告按账户隔离
 
 ## 本地运行
 
@@ -21,6 +22,20 @@ uvicorn app.main:app --reload --port 8000
 ```
 
 启动后访问 `http://localhost:8000/docs`。
+
+### 用户与认证
+
+首次访问用户接口会创建隔离的临时工作区，并通过 HttpOnly Cookie 保存随机登录态。注册会原地升级当前临时用户，因此已有资料和训练历史不会丢失；登录、退出和当前用户接口为：
+
+```text
+POST /api/v1/auth/register
+POST /api/v1/auth/login
+POST /api/v1/auth/logout
+GET  /api/v1/auth/me
+GET  /api/v1/workspace/overview
+```
+
+密码使用带独立盐的 PBKDF2-SHA256 哈希，数据库只保存登录令牌的 SHA-256 摘要。`X-User-Id` 仅作为响应诊断字段，服务端不会将客户端提交的用户 ID 当作身份凭据。HTTPS 部署必须设置 `AUTH_COOKIE_SECURE=true`。
 
 ### PostgreSQL 运行时
 
