@@ -17,6 +17,35 @@ def _values(items: Any) -> list[str]:
     return [str(item).strip() for item in items if str(item).strip()]
 
 
+def _canonical_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    """Keep only resume evidence that can legitimately affect matching.
+
+    Database records also contain volatile metadata such as ``user_id`` and
+    ``updated_at``.  Including those values in the score fingerprint would
+    invalidate an otherwise identical snapshot whenever a training session
+    re-saves the canonical profile.  Lists are sorted so display-order-only
+    edits do not trigger another paid model call either.
+    """
+
+    def text(value: Any) -> str:
+        return re.sub(r"[ \t]+", " ", str(value or "").replace("\r\n", "\n").replace("\r", "\n")).strip()
+
+    def values(value: Any) -> list[str]:
+        normalized = {text(item) for item in value} if isinstance(value, list) else set()
+        return sorted((item for item in normalized if item), key=str.casefold)
+
+    return {
+        "headline": text(profile.get("headline")),
+        "summary": text(profile.get("summary")),
+        "education": text(profile.get("education")),
+        "experience": text(profile.get("experience")),
+        "skills": values(profile.get("skills")),
+        "projects": values(profile.get("projects")),
+        "achievements": values(profile.get("achievements")),
+        "constraints": values(profile.get("constraints")),
+    }
+
+
 def build_match_context(
     *,
     role: str,
@@ -25,6 +54,7 @@ def build_match_context(
     profile: dict[str, Any],
 ) -> dict[str, Any]:
     """Build the canonical resume/JD comparison used by every score surface."""
+    canonical_profile = _canonical_profile(profile)
     explicit_required = _values(job_skills)
     required = {
         normalize_skill(skill)
@@ -32,18 +62,18 @@ def build_match_context(
         if str(skill).strip()
     }
     profile_parts = [
-        *_values(profile.get("skills")),
-        *_values(profile.get("projects")),
-        *_values(profile.get("achievements")),
-        str(profile.get("headline") or ""),
-        str(profile.get("summary") or ""),
-        str(profile.get("education") or ""),
-        str(profile.get("experience") or ""),
+        *_values(canonical_profile.get("skills")),
+        *_values(canonical_profile.get("projects")),
+        *_values(canonical_profile.get("achievements")),
+        str(canonical_profile.get("headline") or ""),
+        str(canonical_profile.get("summary") or ""),
+        str(canonical_profile.get("education") or ""),
+        str(canonical_profile.get("experience") or ""),
     ]
     profile_text = "\n".join(part for part in profile_parts if part.strip())
     candidate = {
         normalize_skill(skill)
-        for skill in [*_values(profile.get("skills")), *extract_skills(profile_text)]
+        for skill in [*_values(canonical_profile.get("skills")), *extract_skills(profile_text)]
         if str(skill).strip()
     }
     matched = sorted(required & candidate)
@@ -52,7 +82,7 @@ def build_match_context(
     return {
         "role": str(role or "").strip(),
         "job_text": str(job_text or "").strip(),
-        "profile": profile,
+        "profile": canonical_profile,
         "required_skills": sorted(required),
         "candidate_skills": sorted(candidate),
         "profile_matched_skills": matched,
@@ -98,9 +128,15 @@ def match_score_schema() -> dict[str, Any]:
     }
     return {
         "type": "object",
-        "required": [*dimensions, "strengths", "gaps", "explanation"],
+        # Gateways and strong models sometimes wrap the four scores in a
+        # Chinese ``scores`` object and include harmless candidate/role labels.
+        # Keep the evidence lists required, then normalize either score shape.
+        "required": ["strengths", "gaps", "explanation"],
         "properties": {
             **dimensions,
+            "scores": {"type": "object"},
+            "candidate_name": {"type": "string"},
+            "role": {"type": "string"},
             "strengths": {"type": "array", "items": {"type": "string"}},
             "gaps": {"type": "array", "items": {"type": "string"}},
             "explanation": {"type": "string"},
@@ -110,7 +146,7 @@ def match_score_schema() -> dict[str, Any]:
                 "items": personalized_question,
             },
         },
-        "additionalProperties": False,
+        "additionalProperties": True,
     }
 
 
@@ -246,11 +282,16 @@ def model_match_snapshot(
     *,
     provider: str = "strong_model",
 ) -> dict[str, Any]:
+    score_object = parsed.get("scores") if isinstance(parsed.get("scores"), dict) else {}
+
+    def score_for(english: str, chinese: str) -> Any:
+        return parsed.get(english, score_object.get(chinese))
+
     breakdown = {
-        "skill_coverage": _score(parsed.get("skill_coverage"), context["skill_coverage"]),
-        "experience_relevance": _score(parsed.get("experience_relevance")),
-        "project_evidence": _score(parsed.get("project_evidence")),
-        "role_alignment": _score(parsed.get("role_alignment")),
+        "skill_coverage": _score(score_for("skill_coverage", "技能覆盖"), context["skill_coverage"]),
+        "experience_relevance": _score(score_for("experience_relevance", "相关经历")),
+        "project_evidence": _score(score_for("project_evidence", "项目证据")),
+        "role_alignment": _score(score_for("role_alignment", "岗位方向一致性")),
     }
     total = round(
         0.55 * breakdown["skill_coverage"]

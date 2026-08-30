@@ -229,6 +229,24 @@ def test_model_match_score_is_generated_once_then_loaded_from_snapshot(monkeypat
     assert second["score_snapshot_id"] == first["score_snapshot_id"]
 
 
+def test_match_snapshot_is_immutable_after_first_write():
+    from app.main import db
+
+    base = {
+        "user_id": "snapshot-user",
+        "target_key": "job:immutable",
+        "input_hash": "same-input",
+        "scoring_version": "test-v1",
+        "score_source": "strong_model",
+    }
+    first = db.save_match_snapshot({**base, "match_score": 81, "score_explanation": "first"})
+    second = db.save_match_snapshot({**base, "match_score": 29, "score_explanation": "second"})
+
+    assert first["id"] == second["id"]
+    assert second["match_score"] == 81
+    assert second["score_explanation"] == "first"
+
+
 def test_match_preview_job_id_uses_owned_saved_jd_and_profile():
     with TestClient(app) as client:
         assert client.put(
@@ -256,6 +274,28 @@ def test_match_preview_job_id_uses_owned_saved_jd_and_profile():
         assert denied.status_code == 404
 
 
+def test_cleared_confirmed_profile_does_not_fall_back_to_stale_browser_profile():
+    with TestClient(app) as client:
+        assert client.put("/api/v1/profile", json={"skills": [], "projects": []}).status_code == 200
+        saved = client.post(
+            "/api/v1/jobs",
+            json={"title": "后端岗位", "jd_text": "Python FastAPI"},
+        )
+        job_id = saved.json()["job"]["id"]
+        response = client.post(
+            "/api/v1/matches",
+            json={
+                "mode": "technical",
+                "job_id": job_id,
+                "user_profile": {"skills": ["Python", "FastAPI"], "projects": ["stale browser data"]},
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["profile_matched_skills"] == []
+        assert response.json()["match_score"] == 0
+
+
 def test_match_snapshot_is_recomputed_after_confirmed_profile_changes():
     with TestClient(app) as client:
         assert client.put("/api/v1/profile", json={"skills": ["Python"], "projects": []}).status_code == 200
@@ -278,6 +318,37 @@ def test_match_snapshot_is_recomputed_after_confirmed_profile_changes():
         assert second["score_snapshot_id"] != first["score_snapshot_id"]
         assert second["profile_matched_skills"] == ["fastapi", "postgresql", "python"]
         assert second["match_score"] >= first["match_score"]
+
+
+def test_match_snapshot_survives_identical_profile_resave_and_training_start():
+    with TestClient(app) as client:
+        profile = {
+            "headline": "后端开发工程师",
+            "skills": ["Python", "FastAPI"],
+            "projects": ["TechMatch"],
+        }
+        assert client.put("/api/v1/profile", json=profile).status_code == 200
+        saved = client.post(
+            "/api/v1/jobs",
+            json={"title": "后端岗位", "jd_text": "Python FastAPI PostgreSQL"},
+        )
+        job_id = saved.json()["job"]["id"]
+        first = client.post("/api/v1/matches", json={"mode": "technical", "job_id": job_id}).json()
+
+        # Both actions update profile storage metadata in the current flow,
+        # but neither changes resume/JD evidence and therefore must not create
+        # another score or call the model again.
+        assert client.put("/api/v1/profile", json=profile).status_code == 200
+        started = client.post(
+            "/api/v1/sessions",
+            json={"mode": "technical", "job_id": job_id, "role": "ignored browser role"},
+        )
+        assert started.status_code == 200
+        second = client.post("/api/v1/matches", json={"mode": "technical", "job_id": job_id}).json()
+
+        assert second["score_cached"] is True
+        assert second["score_snapshot_id"] == first["score_snapshot_id"]
+        assert second["match_score"] == first["match_score"]
 
 
 def test_match_generates_traceable_personalized_questions_from_retrieved_bank(monkeypatch):
@@ -348,6 +419,36 @@ def test_match_generates_traceable_personalized_questions_from_retrieved_bank(mo
     assert question["rubric"] == source["rubric"]
     assert question["personalization_basis"]
     assert any("TechMatch" in message["content"] for batch in prompts for message in batch)
+
+
+def test_match_score_accepts_strong_model_chinese_score_wrapper():
+    from app.services.matching import build_match_context, match_score_schema, model_match_snapshot
+    from app.services.model_router import ModelRouter
+
+    payload = {
+        "candidate_name": "张三",
+        "role": "后端工程师",
+        "scores": {"技能覆盖": 78, "相关经历": 64, "项目证据": 35, "岗位方向一致性": 76},
+        "strengths": ["FastAPI"],
+        "gaps": ["故障排查"],
+        "explanation": "岗位方向与简历基本匹配。",
+        "personalized_questions": [],
+    }
+    ModelRouter.validate_json(payload, match_score_schema())
+    context = build_match_context(
+        role="后端工程师",
+        job_text="Python FastAPI PostgreSQL",
+        job_skills=[],
+        profile={"skills": ["Python", "FastAPI"], "projects": ["TechMatch"]},
+    )
+    snapshot = model_match_snapshot(context, payload)
+    assert snapshot["score_source"] == "strong_model"
+    assert snapshot["score_breakdown"] == {
+        "skill_coverage": 78,
+        "experience_relevance": 64,
+        "project_evidence": 35,
+        "role_alignment": 76,
+    }
 
 
 def test_algorithm_runner_rejects_forbidden_code():
