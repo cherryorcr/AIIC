@@ -39,7 +39,8 @@ python scripts/migrate_postgres.py --database-url $env:DATABASE_URL --sqlite-pat
 ```text
 STRONG_MODEL_BASE_URL=https://jojocode.com/v1
 STRONG_MODEL_API_KEY=<server-secret>
-LOCAL_MODEL_BASE_URL=http://100.126.175.112:8000/v1
+# GPU Compose 示例的 LiteLLM 网关默认使用 4000 端口；若你的网关映射为 8000，请相应调整
+LOCAL_MODEL_BASE_URL=http://100.126.175.112:4000/v1
 LOCAL_MODEL_API_KEY=<optional>
 ```
 

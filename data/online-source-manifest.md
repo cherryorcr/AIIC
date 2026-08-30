@@ -4,6 +4,11 @@
 
 本文件记录已核验的公开来源和使用边界。它不是“高频面试题”结论，也不代表所有原始内容都可以再发布。`license_status` 必须在每次同步前重新确认。
 
+本次导入使用 `yangshun/tech-interview-handbook`（提交
+`e1d28e8886c0b6ff3e50da991ce0e895134ddc59`）。GitHub API 返回仓库
+`license.spdx_id=MIT`，并在仓库根目录提供 MIT LICENSE。行为面条目来自仓库中按公司整理的公开问题清单；算法与系统设计条目是基于同一仓库公开题名/主题的中文转写，未复制 LeetCode 原题正文或答案。导入文件为
+`data/approved-dataset.json`，每条记录保留 URL、许可证、版本、访问时间、内容哈希、PII 脱敏和可再分发标记。
+
 | source_id | 来源 | 可得到的内容 | license_status | 建议用途 | 注意事项 |
 | --- | --- | --- | --- | --- | --- |
 | hf-kareem-ai-interview | [K-areem/AI-Interview-Questions](https://huggingface.co/datasets/K-areem/AI-Interview-Questions) | 英文 AI/ML、数据科学、系统设计、DSA 问答；train 4,653 条，eval 1,164 条 | 未在数据卡中声明 | 原型检索和字段设计参考 | 可通过 Hugging Face datasets-server 读取样例；在确认许可证前不要把原文提交到公开仓库 |
@@ -13,6 +18,14 @@
 | github-liquidslr-company | [liquidslr/leetcode-company-wise-problems](https://github.com/liquidslr/leetcode-company-wise-problems) | 按公司和时间窗口整理的 LeetCode 题目链接/频次列表；页面说明更新至 2025-06-20 | 未找到明确许可证；LeetCode 内容有独立权利 | 仅作候选题目发现和外链索引 | 不复制题干、解答或付费内容；发布前确认源仓库与 LeetCode 条款 |
 | onet-31 | [O*NET Database](https://www.onetcenter.org/database.html) | 职业、任务、技能、知识和工作活动 | CC BY 4.0（O*NET 31.0） | Job/Skill 节点、岗位技能标准化 | 按要求署名；修改后标注修改内容，不暗示 USDOL 背书 |
 | esco | [ESCO classification](https://esco.ec.europa.eu/en/about-esco/what-esco) | 3,039 个职业、13,939 个技能，支持多语言和 RDF/CSV/JSON-LD 下载 | 下载条款需在导出时确认 | 职业与技能 taxonomy、跨语言归一化 | 只使用官方下载/API，保存版本号和下载日期 |
+
+## 本次已导入的数据集
+
+| 文件 | 条目数 | 内容 | 许可与边界 |
+| --- | ---: | --- | --- |
+| `data/approved-dataset.json` | 31 | 10 条公开行为面问题、17 条算法题转写、4 条系统设计/技术面转写 | MIT 来源；算法题为自行转写，LeetCode 仅作为外部问题链接/题名参考；不可据此宣称公司官方题库或统计频次 |
+
+数据库中保留原有 9 条 `synthetic_mock` 记录但已软删除（active=0），便于审计和回滚；当前活动题目为上述 31 条公开来源数据。
 
 ## 已执行的只读核验
 
@@ -36,4 +49,3 @@ skills, difficulty, pii_redacted, source_confidence, redistribution_allowed
 - 压力面：连续追问、限时重答、质疑证据
 - 案例面：指标拆解、假设验证、产品权衡
 - 科研面：研究假设、实验设计、局限性
-

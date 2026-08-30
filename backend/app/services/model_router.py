@@ -34,7 +34,11 @@ from app.config import Settings
 from app.storage.db import Database
 
 
-LOCAL_TASKS = {"extract", "embed", "embedding", "rerank", "simple_evaluate"}
+# Question generation is deliberately local-first as well.  It runs during
+# session creation and should not make the UI wait behind a slow/queued hosted
+# provider; the strong model remains available as a fallback for this task and
+# is preferred for the higher-value answer evaluation path.
+LOCAL_TASKS = {"extract", "embed", "embedding", "rerank", "simple_evaluate", "question"}
 TRANSIENT_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
@@ -139,6 +143,12 @@ class ModelRouter:
                         "messages": messages,
                         "temperature": temperature,
                     }
+                    # Qwen3 exposes its chain-of-thought by default.  Keep
+                    # internal reasoning out of user-visible questions and
+                    # make JSON-schema responses parseable.  This option is
+                    # specific to Qwen3-compatible vLLM chat templates.
+                    if provider_name == "local" and "qwen3" in model.lower():
+                        request_body["chat_template_kwargs"] = {"enable_thinking": False}
                     if max_tokens is not None:
                         request_body["max_tokens"] = max_tokens
                     if response_schema is not None:
@@ -212,7 +222,22 @@ class ModelRouter:
                         attempt=attempt + 1,
                     )
                     self._mark_provider(provider_name, ok=False, error=error)
-                    if attempt < max_retries and backoff:
+                    # Retry only failures that are likely to succeed on a
+                    # subsequent attempt.  In particular, authentication
+                    # (401/403), invalid requests (4xx) and schema/parse
+                    # errors must fall through to the next provider
+                    # immediately; retrying them needlessly blocks the
+                    # interview request and can make the browser time out.
+                    retryable = self._retryable(status_code, exc)
+                    if not retryable or attempt >= max_retries:
+                        # Move to the next provider immediately for
+                        # deterministic failures (auth, invalid request,
+                        # malformed/schema output).  Without this break the
+                        # loop would still issue all retry attempts, defeating
+                        # the fallback path and making a single turn exceed
+                        # the browser timeout.
+                        break
+                    if backoff:
                         await asyncio.sleep(min(backoff * (2**attempt), 5.0))
 
         self._record_invocation(
@@ -296,8 +321,11 @@ class ModelRouter:
                     error = self._error_name(exc, status_code)
                     self._record_invocation(session_id=session_id, task="embed", provider=provider_name, model=model, latency_ms=round((time.perf_counter() - started) * 1000, 2), status="error", fallback_reason=error, input_tokens=input_tokens, cost_usd=self.estimate_cost(provider_name, input_tokens, 0), attempt=attempt + 1)
                     self._mark_provider(provider_name, ok=False, error=error)
-                    if attempt < int(getattr(self.settings, "model_max_retries", 2)):
-                        await asyncio.sleep(min(max(0.0, float(getattr(self.settings, "model_retry_backoff_seconds", .25))) * (2**attempt), 5.0))
+                    retryable = self._retryable(status_code, exc)
+                    max_retries = int(getattr(self.settings, "model_max_retries", 2))
+                    if not retryable or attempt >= max_retries:
+                        break
+                    await asyncio.sleep(min(max(0.0, float(getattr(self.settings, "model_retry_backoff_seconds", .25))) * (2**attempt), 5.0))
         self._record_invocation(session_id=session_id, task="embed", provider="fallback", model="rules", status="fallback", fallback_reason="embedding_unavailable")
         self._mark_provider("fallback", ok=True, error="embedding_unavailable")
         return {"ok": False, "embeddings": [], "provider": "fallback", "error": "embedding_unavailable", "fallback": True}
@@ -490,9 +518,26 @@ class ModelRouter:
 
     @staticmethod
     def _error_name(exc: Exception, status_code: int | None) -> str:
-        if status_code:
+        if status_code is not None and status_code >= 400:
             return f"http_{status_code}"
         if isinstance(exc, TimeoutError) or (httpx is not None and isinstance(exc, httpx.TimeoutException)):
             return "timeout"
         message = str(exc).strip().replace("\n", " ")
         return message[:120] if message else type(exc).__name__
+
+    @staticmethod
+    def _retryable(status_code: int | None, exc: Exception) -> bool:
+        """Return whether retrying the same provider is useful.
+
+        Provider authentication and request/schema failures are deterministic
+        and should immediately fall back to another configured provider.  A
+        missing HTTP status generally means a timeout or transport failure,
+        which is safe to retry.
+        """
+        if status_code is not None:
+            return status_code in TRANSIENT_STATUS
+        if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+            return True
+        if httpx is not None and isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
+            return True
+        return False

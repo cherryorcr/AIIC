@@ -172,8 +172,13 @@ class GraphRAGService:
         )
         query_tokens = _tokens(" ".join([role, job_text, profile_text]))
         query_vector = self._vector(" ".join([role, job_text, profile_text]))
+        scoped = [item for item in self.items if item.get("process_type") == process]
+        if mode == "algorithm":
+            scoped = [item for item in self.items if item.get("process_type") in {process, "技术面"}]
+        # Keep a useful fallback for a newly introduced scene with no data, but
+        # never mix unrelated scenes when the requested stage has candidates.
         candidates: list[tuple[float, dict[str, Any]]] = []
-        for item in self.items:
+        for item in (scoped or self.items):
             score = 0.0
             if item.get("process_type") == process:
                 score += 5.0

@@ -63,7 +63,12 @@ class InterviewService:
         if not questions:
             raise ValueError("题库暂无可用题目")
         question = dict(questions[0])
-        generated = await self.router.complete("question", question_prompt(mode, payload.get("role", ""), payload.get("user_profile", {}), matched), session_id)
+        generated = await self.router.complete(
+            "question",
+            question_prompt(mode, payload.get("role", ""), payload.get("user_profile", {}), matched),
+            session_id,
+            max_tokens=256,
+        )
         if generated.get("ok") and generated.get("text", "").strip():
             question["question"] = generated["text"].strip()
         session = {
@@ -115,6 +120,21 @@ class InterviewService:
             raise KeyError("session_not_found")
         question = session.get("current_question") or {}
         if payload["question_id"] != question.get("question_id"):
+            # A client can lose the response after the server has committed a
+            # turn (for example when a model call outlives a proxy timeout)
+            # and then replay the same POST.  Treat an already evaluated
+            # session/question pair as idempotent and return its persisted
+            # result rather than surfacing question_id_not_current.
+            existing = self.db.get_turn_by_question(session_id, payload["question_id"])
+            if existing and existing.get("feedback"):
+                return {
+                    "turn_id": existing["id"],
+                    "session_id": session_id,
+                    "question_id": payload["question_id"],
+                    "feedback": existing["feedback"],
+                    "next_question": session.get("current_question"),
+                    "algorithm_result": existing.get("algorithm_result"),
+                }
             raise ValueError("question_id_not_current")
         answer_text = payload.get("answer_text", "").strip()
         if not answer_text and not payload.get("code"):
@@ -134,6 +154,7 @@ class InterviewService:
             evaluation_prompt(session["mode"], question.get("question", ""), answer_text, session["user_profile"], rubric),
             session_id,
             response_schema=feedback_schema(session["mode"]),
+            max_tokens=1200,
         )
         feedback = self._fallback_feedback(session["mode"], answer_text, rubric, algorithm_result)
         if generated.get("ok"):

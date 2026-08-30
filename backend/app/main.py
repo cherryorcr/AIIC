@@ -27,7 +27,7 @@ from app.services.interview import InterviewService
 from app.services.documents import ALLOWED_EXTENSIONS, extract_document_text, parse_document
 from app.services.model_router import ModelRouter
 from app.services.prompts import SCENE_POLICIES
-from app.services.rag import GraphRAGService, extract_skills
+from app.services.rag import GraphRAGService, MODE_TO_PROCESS, extract_skills
 from app.services.sandbox import SandboxService
 from app.storage.db import Database
 
@@ -114,12 +114,21 @@ def preview_match(request: SessionCreate) -> dict[str, Any]:
     # This is deliberately an explainable heuristic score for the MVP; a
     # configured model can later replace it without changing the response shape.
     score = min(100, max(0, 50 + len(matched.get("matched_skills", [])) * 5 + min(len(questions), 5) * 2))
+    confidences = [str(question.get("source_confidence") or "").lower() for question in questions]
+    if any(value == "synthetic_mock" for value in confidences):
+        source_confidence = "synthetic_mock"
+    elif any(value == "medium" for value in confidences):
+        source_confidence = "medium"
+    elif confidences and all(value == "high" for value in confidences):
+        source_confidence = "high"
+    else:
+        source_confidence = "observed"
     return {
         "role": request.role,
         "match_score": score,
         "matched_skills": matched.get("matched_skills", []),
         "questions": questions,
-        "source_confidence": "synthetic_mock" if any("synthetic_mock" in q.get("source_refs", []) for q in questions) else "observed",
+        "source_confidence": source_confidence,
     }
 
 
@@ -140,6 +149,9 @@ def public_questions(
     limit: int = 100,
 ) -> dict[str, Any]:
     """Read-only question-bank search for the frontend and anonymous users."""
+    # The UI uses stable mode IDs while the knowledge tables retain the
+    # user-facing Chinese stage labels. Accept both at the API boundary.
+    process_type = MODE_TO_PROCESS.get(process_type or "", process_type)
     items = db.list_questions(process_type=process_type, limit=max(1, min(limit, 500)))
     normalized_query = (query or q or "").strip().lower()
     normalized_skill = (skill or "").strip().lower()
@@ -470,6 +482,7 @@ def list_knowledge_items(
     x_admin_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
     _require_admin(x_admin_token)
+    process_type = MODE_TO_PROCESS.get(process_type or "", process_type)
     items = db.list_questions(
             process_type=process_type,
             limit=max(1, min(limit, 500)),

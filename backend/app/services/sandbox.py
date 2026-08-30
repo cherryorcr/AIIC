@@ -18,7 +18,23 @@ ALLOWED_IMPORTS = {
     "bisect", "collections", "decimal", "fractions", "functools", "heapq",
     "itertools", "math", "operator", "random", "re", "statistics", "string", "typing",
 }
-FORBIDDEN_CALLS = {"__import__", "breakpoint", "compile", "eval", "exec", "input", "open"}
+# Keep the submission runtime deliberately small.  In particular, reflective
+# builtins such as getattr/globals/vars can be used to recover blocked dunder
+# attributes even when the AST contains no explicit forbidden attribute.
+ALLOWED_BUILTINS = {
+    "ArithmeticError", "AssertionError", "AttributeError", "BaseException", "Exception",
+    "IndexError", "KeyError", "LookupError", "MemoryError", "NotImplementedError",
+    "OverflowError", "RuntimeError", "StopIteration", "TypeError", "ValueError", "ZeroDivisionError",
+    "abs", "all", "any", "bool", "bytes", "callable", "chr", "dict", "enumerate", "filter",
+    "float", "hash", "int", "isinstance", "iter", "len", "list", "map", "max", "min",
+    "next", "ord", "pow", "print", "range", "repr", "reversed", "round", "set", "slice",
+    "sorted", "str", "sum", "tuple", "zip",
+}
+FORBIDDEN_CALLS = {
+    "__import__", "breakpoint", "compile", "eval", "exec", "input", "open", "getattr",
+    "setattr", "delattr", "vars", "globals", "locals", "dir", "type", "object", "super",
+    "help", "license", "credits", "quit", "exit",
+}
 FORBIDDEN_ATTRIBUTES = {
     "__bases__", "__builtins__", "__class__", "__code__", "__globals__",
     "__mro__", "__subclasses__", "__traceback__",
@@ -48,9 +64,19 @@ class _CodePolicy(ast.NodeVisitor):
             self.fail(f"禁止调用: {node.func.id}")
         self.generic_visit(node)
 
+    def visit_Name(self, node: ast.Name) -> None:  # noqa: N802
+        if node.id.startswith("__"):
+            self.fail(f"禁止访问名称: {node.id}")
+        self.generic_visit(node)
+
     def visit_Attribute(self, node: ast.Attribute) -> None:  # noqa: N802
-        if node.attr in FORBIDDEN_ATTRIBUTES:
+        if node.attr in FORBIDDEN_ATTRIBUTES or node.attr.startswith("__"):
             self.fail(f"禁止访问属性: {node.attr}")
+        self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> None:  # noqa: N802
+        if isinstance(node.value, str) and "__" in node.value:
+            self.fail("代码中不允许使用双下划线反射名称")
         self.generic_visit(node)
 
 
@@ -157,8 +183,7 @@ _allowed = {sorted(ALLOWED_IMPORTS)!r}
 def _limited_import(name, globals=None, locals=None, fromlist=(), level=0):
     if level or name.split(".", 1)[0] not in _allowed: raise ImportError("sandbox import denied: " + name)
     return _safe_import(name, globals, locals, fromlist, level)
-_user_builtins = dict(vars(_builtins))
-for _name in {sorted(FORBIDDEN_CALLS)!r}: _user_builtins.pop(_name, None)
+_user_builtins = {{_name: getattr(_builtins, _name) for _name in {sorted(ALLOWED_BUILTINS)!r} if hasattr(_builtins, _name)}}
 _user_builtins["__import__"] = _limited_import
 _scope = {{"__builtins__": _user_builtins, "__name__": "__sandbox__"}}
 exec(compile({encoded_code}, "<submission>", "exec"), _scope, _scope)

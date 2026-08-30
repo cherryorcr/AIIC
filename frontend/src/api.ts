@@ -12,6 +12,7 @@ export type BackendQuestion = {
   skills?: string[];
   difficulty?: string;
   source_refs?: string[];
+  source_confidence?: string;
   tests?: Array<{
     args?: unknown[];
     kwargs?: Record<string, unknown>;
@@ -252,7 +253,10 @@ export function startSession(input: {
   return request<StartSessionResponse>(
     "/api/v1/sessions",
     { method: "POST", body: JSON.stringify(input) },
-    { timeoutMs: 20000, retries: 2 },
+    // Session creation may generate the first question with the strong model.
+    // It is a POST, so replaying it after a client timeout can create orphan
+    // sessions; wait for one bounded request instead of retrying blindly.
+    { timeoutMs: 120000, retries: 0 },
   ).then((result) => {
     rememberSession(result.session_id);
     return result;
@@ -292,6 +296,14 @@ export function submitTurn(
   return request<TurnResponse>(`/api/v1/sessions/${encodeURIComponent(sessionId)}/turns`, {
     method: "POST",
     body: JSON.stringify(input),
+  }, {
+    // Evaluation may call the remote strong model and then the GPU-hosted
+    // fallback. Do not abort a valid in-flight answer after the generic
+    // 12-second request budget. Retries are intentionally disabled here:
+    // replaying a POST after a client timeout can race with the first request
+    // and advance the interview to the next question twice.
+    timeoutMs: 120000,
+    retries: 0,
   });
 }
 
