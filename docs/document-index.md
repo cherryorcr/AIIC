@@ -15,9 +15,12 @@
 | 详细设计 | `docs/system-detailed-design.md` | 前后端、算法、运维 | 已补齐 |
 | 接口 | `docs/api-design.md` | 前后端、测试 | 已补齐，作为详细接口说明 |
 | 数据 | `docs/database-design.md` | 后端、数据管理员、运维 | 已有并与当前 schema 对齐 |
-| 质量 | `docs/test-plan.md` | 开发、测试、评审 | 已补齐 |
+| 质量 | `docs/test-plan.md` | 开发、测试、评审 | 已补齐，含最近一次 40/40 通过记录 |
 | 追踪 | `docs/requirements-traceability.md` | 项目负责人、评审 | 已补齐 |
-| 决策 | `docs/adr.md` | 全体开发、后续维护者 | 已补齐 |
+| 决策 | `docs/adr.md` | 全体开发、后续维护者 | 已补齐（ADR-001 至 ADR-009） |
+| 架构图 | `docs/architecture-diagrams.md` | 全体开发、评审 | 已有，Mermaid 上下文/组件/ER/时序/部署图 |
+| 原型 | `docs/ui-prototype.md` | 产品、前端、评审 | 已有，页面线框与交互流程的文字化基线 |
+| 性能 | `docs/performance-test-plan.md` | 开发、运维、评审 | 已有，含规则路径实测基线与模型/并发测试方案 |
 | 来源治理 | `docs/report-source.md`、`data/README.md` | 数据管理员、评审 | 已有，强调许可和来源 |
 | 部署运维 | `docs/deployment-runbook.md` | 部署、运维 | 已有，包含 CPU/GPU 双主机拓扑 |
 | 共享契约 | `docs/contracts.md` | 前后端 | 已有，兼容历史接口；新接口详见 `api-design.md` |

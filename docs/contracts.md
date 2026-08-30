@@ -19,7 +19,7 @@ GET  /api/v1/workspace/overview
 ```json
 {
   "session_id": "local-uuid",
-  "mode": "technical|behavioral|stress|case|research|hr|algorithm",
+  "mode": "technical|algorithm|behavioral|stress|case|research|hr|group",
   "role": "软件开发/算法",
   "job_text": "脱敏 JD",
   "user_profile": {

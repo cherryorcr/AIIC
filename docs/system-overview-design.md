@@ -59,7 +59,7 @@ AIIC 是一个面向学生求职、实习、校招和保研准备的场景化文
 
 ```text
 Presentation Layer
-  ├─ React pages: 总览、训练、岗位匹配、资料、题库、报告、账户
+  ├─ React pages: 总览、训练（含群面/算法工作台）、岗位匹配、资料、题库、报告、账户、设置
   └─ API client: timeout/retry/auth-cookie/error normalization
 
 Application Layer
@@ -90,7 +90,8 @@ Infrastructure Layer
 | Profile/Job | 用户画像、岗位和 JD 持久化 | `main.py` + `storage/db.py` |
 | Document | 文件类型/大小校验、文本抽取、AI 解析、人工确认 | `services/documents.py` |
 | GraphRAG | 技能归一化、关系过滤、去重、向量/词法相似度、来源返回 | `services/rag.py` |
-| Interview | 会话状态、首题、回答、重答、追问、反馈、报告 | `services/interview.py` |
+| Matching | 简历-JD 评分快照、强模型 4 维打分、个性化出题 | `services/matching.py` |
+| Interview | 会话状态、首题、回答、重答、追问、反馈、报告、群面队友讨论 | `services/interview.py` |
 | Prompt Policy | 按场景设置题目指令、评价维度和群面反应 | `services/prompts.py` |
 | Model Router | provider 顺序、重试、JSON 修复、健康、成本遥测 | `services/model_router.py` |
 | Sandbox | Python AST 策略检查、受限子进程、固定测试执行 | `services/sandbox.py` |

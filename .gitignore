@@ -36,3 +36,4 @@ build_project_plan.py
 .DS_Store
 Thumbs.db
 
+.memo-preview/

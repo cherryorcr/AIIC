@@ -16,7 +16,7 @@ AIIC（AI Interview Coach）是一个面向求职者的场景化 AI 面试陪练
 
 `data/approved-dataset.json` 是当前活动题库：行为面题来自 MIT 许可的 Tech Interview Handbook 公开汇总，算法/系统设计题为基于其题名和主题的自行转写。它们不是公司官方题库或频次统计；LeetCode 原题正文和答案没有复制。`data/mock-interview-dataset.json` 与问卷样例仍明确标记为 `synthetic_mock`，仅用于历史审计和开发演示。所有外部数据必须记录来源 URL、许可证、访问时间、版本和脱敏状态。
 
-项目设计与交付边界见：`docs/document-index.md`、`docs/product-memo.md`、`docs/use-case-design.md`、`docs/system-overview-design.md`、`docs/system-detailed-design.md`、`docs/api-design.md`、`docs/test-plan.md`、`docs/requirements-traceability.md` 和 `docs/adr.md`。Product Memo 明确区分已确认的需求输入、`synthetic_mock` 样例与尚待完成的真实用户研究，不把模拟数据描述为真实访谈。
+项目设计与交付边界见：`docs/document-index.md`（文档地图入口）、`docs/product-memo.md`、`docs/use-case-design.md`、`docs/system-overview-design.md`、`docs/architecture-diagrams.md`（Mermaid 架构/部署/时序图）、`docs/system-detailed-design.md`、`docs/api-design.md`、`docs/ui-prototype.md`（前端原型与交互）、`docs/test-plan.md`、`docs/performance-test-plan.md`（性能基线与方案）、`docs/requirements-traceability.md`、`docs/adr.md` 和根目录 `CHANGELOG.md`。Product Memo 明确区分已确认的需求输入、`synthetic_mock` 样例与尚待完成的真实用户研究，不把模拟数据描述为真实访谈。
 
 ## 本地运行
 
