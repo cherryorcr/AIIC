@@ -432,6 +432,10 @@ class Database:
                 "INSERT OR IGNORE INTO schema_migrations(version, description, applied_at) VALUES (?, ?, ?)",
                 (4, "model invocation token, cost and retry telemetry", utc_now()),
             )
+            self._conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, description, applied_at) VALUES (?, ?, ?)",
+                (5, "candidate resume and job-description documents", utc_now()),
+            )
 
     def seed_questions(self, items: list[dict[str, Any]], *, prune: bool = False) -> int:
         """幂等写入题目、技能、来源和图边；返回本次处理题目数。
