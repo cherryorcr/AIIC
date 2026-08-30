@@ -541,6 +541,61 @@ def test_resume_fallback_sections_are_mapped_to_profile_fields():
     assert profile["achievements"] == ["优秀员工奖"]
 
 
+def test_model_resume_extraction_is_repaired_into_explicit_fields():
+    import asyncio
+    import json
+
+    from app.services.documents import parse_document
+
+    text = (
+        "个人简介\n张三 | 北京航空航天大学 · 软件工程\n"
+        "研究兴趣：大模型应用、RAG\n"
+        "教育背景\n北京航空航天大学 · 软件工程 · 本科在读\n"
+        "工作/实习经历\n某科技公司 · 后端实习生 · 2025\n"
+        "项目经历\nTechMatch 面试匹配平台\n"
+        "专业技能\nPython FastAPI PostgreSQL\n"
+        "关键成果\n接口延迟下降 20%"
+    )
+
+    class MisalignedRouter:
+        async def complete(self, *_args, **_kwargs):
+            # Simulate the failure seen in production: the model copies the
+            # whole PDF into summary/education instead of filling fields.
+            payload = {
+                "kind": "resume",
+                "profile": {
+                    "full_name": text,
+                    "summary": text,
+                    "education": text,
+                    "experience": "",
+                    "skills": "Python, FastAPI",
+                    "projects": "",
+                    "achievements": [],
+                    "constraints": [],
+                },
+                "warnings": [],
+            }
+            return {"ok": True, "text": json.dumps(payload, ensure_ascii=False), "provider": "fake"}
+
+        @staticmethod
+        def parse_json(value):
+            return json.loads(value)
+
+        @staticmethod
+        def repair_json(_value):
+            return None
+
+    parsed = asyncio.run(parse_document("resume", text, MisalignedRouter()))
+    profile = parsed["parsed"]["profile"]
+    assert profile["full_name"] == "张三"
+    assert "北京航空航天大学" in profile["education"]
+    assert "某科技公司" in profile["experience"]
+    assert profile["projects"] == ["TechMatch 面试匹配平台"]
+    assert "python" in profile["skills"]
+    assert profile["achievements"] == ["接口延迟下降 20%"]
+    assert "工作/实习经历" not in profile["education"]
+
+
 def test_session_can_be_completed_and_reported():
     with TestClient(app) as client:
         started = client.post("/api/v1/sessions", json={"mode": "technical", "role": "后端工程师"})
