@@ -53,11 +53,17 @@ class _PostgresCompatConnection:
                 self.execute(statement)
 
     def __enter__(self):
-        self.raw.__enter__()
+        # psycopg's connection context manager closes the connection on exit.
+        # This adapter is held for the lifetime of the FastAPI process, so a
+        # repository transaction must commit/rollback without closing it.
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        return self.raw.__exit__(exc_type, exc, tb)
+        if exc_type is None:
+            self.raw.commit()
+        else:
+            self.raw.rollback()
+        return False
 
     def close(self):
         return self.raw.close()
@@ -131,6 +137,11 @@ class Database:
         sql = sql.replace("INSERT OR IGNORE INTO", "INSERT INTO")
         if ignored and "ON CONFLICT" not in sql.upper():
             sql = sql.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+        # SQLite represents booleans as 0/1, while the PostgreSQL schema uses
+        # native BOOLEAN columns.  TRUE/FALSE are also valid SQLite literals,
+        # so this keeps one repository query surface for both dialects.
+        sql = re.sub(r"\bis_active\s*=\s*1\b", "is_active = TRUE", sql, flags=re.I)
+        sql = re.sub(r"\bis_active\s*=\s*0\b", "is_active = FALSE", sql, flags=re.I)
         # PostgreSQL accepts the same DDL and SELECT syntax after qmark
         # parameters are converted to psycopg's positional placeholders.
         return sql.replace("?", "%s")
@@ -467,8 +478,8 @@ class Database:
                         source_id, str(source.get("title", "")), source.get("url"), source.get("license"),
                         source_type, source.get("version"), source.get("published_at"),
                         source.get("accessed_at") or source.get("collected_at"),
-                        int(bool(source.get("redistribution_allowed", source_type == "synthetic_mock"))),
-                        int(bool(source.get("pii_redacted", True))), source.get("content_hash"), now, now,
+                        bool(source.get("redistribution_allowed", source_type == "synthetic_mock")),
+                        bool(source.get("pii_redacted", True)), source.get("content_hash"), now, now,
                     ),
                 )
                 self._conn.execute(
@@ -490,7 +501,7 @@ class Database:
                         json.dumps(item.get("rubric", []), ensure_ascii=False), item.get("function_name"),
                         json.dumps(item.get("tests", []), ensure_ascii=False), source_id,
                         str(item.get("source_confidence") or ("synthetic_mock" if source_type == "synthetic_mock" else "observed")),
-                        1, now, now,
+                        True, now, now,
                     ),
                 )
                 self._conn.execute("DELETE FROM question_skills WHERE question_id = ?", (question_id,))
@@ -814,7 +825,7 @@ class Database:
                     is_temporary=excluded.is_temporary,
                     last_seen_at=excluded.last_seen_at
                 """,
-                (uid, display_name or "", int(is_temporary), now, now),
+                (uid, display_name or "", bool(is_temporary), now, now),
             )
             row = self._conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
             return dict(row) if row else {"id": uid, "display_name": display_name, "is_temporary": is_temporary}
@@ -1142,6 +1153,30 @@ class Database:
                 item["feedback"] = decode_json(fb[0], {}) if fb else None
                 result.append(item)
             return result
+
+    def get_turn_by_question(self, session_id: str, question_id: str) -> dict[str, Any] | None:
+        """Return the most recent persisted turn for a session/question pair.
+
+        The browser may retry a POST after a timeout even though the first
+        request has already committed.  Looking up the existing turn lets the
+        API return the original result idempotently instead of reporting that
+        the question is no longer current.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM turns WHERE session_id = ? AND question_id = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (session_id, question_id),
+            ).fetchone()
+            if row is None:
+                return None
+            item = dict(row)
+            item["algorithm_result"] = decode_json(item.pop("algorithm_result_json"), None)
+            feedback = self._conn.execute(
+                "SELECT payload_json FROM feedback WHERE turn_id = ?", (item["id"],)
+            ).fetchone()
+            item["feedback"] = decode_json(feedback[0], {}) if feedback else None
+            return item
 
     def save_model_invocation(self, payload: dict[str, Any]) -> None:
         with self._lock, self._conn:

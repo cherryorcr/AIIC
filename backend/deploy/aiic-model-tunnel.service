@@ -1,0 +1,14 @@
+[Unit]
+Description=AIIC reverse tunnel to the CPU application server
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pc
+ExecStart=/usr/bin/ssh -i /home/pc/TechMatch/deploy/tunnel_cpu -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -N -R 172.18.0.1:18000:127.0.0.1:8000 ubuntu@146.56.204.146
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

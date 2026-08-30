@@ -9,11 +9,11 @@ AIIC（AI Interview Coach）是一个面向求职者的场景化 AI 面试陪练
 - 技术面、算法面、行为面、压力面、案例面、科研面和 HR 面
 - FastAPI 面试会话、追问和训练反馈 API
 - Python 算法题挑战版沙箱
-- SQLite 驱动的轻量 GraphRAG 和合成示例题库
+- SQLite 驱动的轻量 GraphRAG；默认加载 31 条带 MIT 来源元数据的公开题库转写
 - React + TypeScript + Vite 前端训练工作台
 - CPU 业务服务器和 GPU 模型服务器的 Docker Compose 示例
 
-题库和问卷样例明确标记为 `synthetic_mock`，不代表真实调研或真实统计。接入公开数据时必须记录来源 URL、许可证、访问时间、版本和脱敏状态。
+`data/approved-dataset.json` 是当前活动题库：行为面题来自 MIT 许可的 Tech Interview Handbook 公开汇总，算法/系统设计题为基于其题名和主题的自行转写。它们不是公司官方题库或频次统计；LeetCode 原题正文和答案没有复制。`data/mock-interview-dataset.json` 与问卷样例仍明确标记为 `synthetic_mock`，仅用于历史审计和开发演示。所有外部数据必须记录来源 URL、许可证、访问时间、版本和脱敏状态。
 
 ## 本地运行
 
@@ -56,7 +56,7 @@ docker compose -f compose.cpu.yml up -d --build
 ```text
 backend/   FastAPI、模型路由、GraphRAG、算法沙箱和测试
 frontend/  React/TypeScript/Vite 前端
-data/      合成题库、问卷样例和在线数据来源台账
+data/      approved 公开题库、合成题库、问卷样例和在线数据来源台账
 docs/      API 契约、研究计划和数据库设计
 ```
 

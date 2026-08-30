@@ -19,6 +19,7 @@ node_modules/
 dist/
 frontend/output/
 frontend/.playwright-cli/
+.playwright-cli/
 frontend/.vite/
 *.log
 
