@@ -581,6 +581,13 @@ def workspace_overview(request: Request, response: Response) -> dict[str, Any]:
     history = db.list_training_history(uid, limit=100)
     reports = db.list_reports(uid, limit=100)
     latest_job = jobs[0] if jobs else None
+    has_target_job = bool(
+        latest_job
+        and any(
+            str(latest_job.get(key) or "").strip()
+            for key in ("jd_text", "job_text", "role", "title")
+        )
+    )
 
     raw_profile_skills = {
         str(value).strip().lower() for value in profile.get("skills", []) if str(value).strip()
@@ -595,13 +602,11 @@ def workspace_overview(request: Request, response: Response) -> dict[str, Any]:
     required_skills = raw_required_skills | set(
         extract_skills(" ".join([*raw_required_skills, str((latest_job or {}).get("jd_text") or "")]))
     )
-    matched_skills = sorted(profile_skills & required_skills)
-    skill_gaps = sorted(required_skills - profile_skills)
-    skill_coverage = (
-        len(matched_skills) / len(required_skills)
-        if required_skills
-        else min(1.0, len(profile_skills) / 5)
-    )
+    matched_skills = sorted(profile_skills & required_skills) if has_target_job else []
+    skill_gaps = sorted(required_skills - profile_skills) if has_target_job else []
+    # A readiness score is a comparison against a concrete target role. A
+    # profile or training history alone must not look like a 50-point match.
+    skill_coverage = len(matched_skills) / len(required_skills) if required_skills else 0.0
 
     completeness_fields = (
         profile.get("full_name"), profile.get("headline"), profile.get("summary"),
@@ -614,8 +619,14 @@ def workspace_overview(request: Request, response: Response) -> dict[str, Any]:
         if isinstance(item.get("average_score"), (int, float))
     ]
     training_score = min(1.0, (sum(score_values) / len(score_values)) / 5) if score_values else min(1.0, len(history) / 5)
-    readiness = round(100 * (0.45 * skill_coverage + 0.30 * profile_completeness + 0.25 * training_score))
-    if readiness >= 80:
+    readiness = (
+        round(100 * (0.45 * skill_coverage + 0.30 * profile_completeness + 0.25 * training_score))
+        if has_target_job
+        else 0
+    )
+    if not has_target_job:
+        readiness_label = "先设置目标岗位，再开始针对性训练"
+    elif readiness >= 80:
         readiness_label = "准备充分，继续强化高频场景"
     elif readiness >= 55:
         readiness_label = "基础已具备，优先补齐能力缺口"

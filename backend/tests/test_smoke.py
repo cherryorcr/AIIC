@@ -343,6 +343,22 @@ def test_registered_accounts_keep_profiles_jobs_readiness_and_sessions_isolated(
         assert owner.get("/api/v1/workspace/overview").json()["counts"]["sessions"] == 1
 
 
+def test_readiness_starts_at_zero_until_a_target_job_exists():
+    with TestClient(app) as client:
+        assert client.put(
+            "/api/v1/profile",
+            json={"skills": ["Python", "FastAPI"], "projects": ["TechMatch"]},
+        ).status_code == 200
+        overview = client.get("/api/v1/workspace/overview")
+        assert overview.status_code == 200
+        readiness = overview.json()["readiness"]
+        assert readiness["score"] == 0
+        assert readiness["skill_coverage"] == 0
+        assert readiness["matched_skills"] == []
+        assert readiness["skill_gaps"] == []
+        assert overview.json()["counts"]["skills"] == 2
+
+
 def test_model_fallback_is_recorded_with_telemetry():
     path = Path(tempfile.mkdtemp(prefix="router-tests-")) / "router.db"
     database = Database(path)

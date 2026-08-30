@@ -615,7 +615,7 @@ function DashboardPage() {
           <div className="skill-strip">
             <span>
               <i className="mini-dot mint" />
-              已掌握 <b>{overview?.counts.skills ?? 0}</b>
+              已掌握 <b>{readiness?.matched_skills.length ?? 0}</b>
             </span>
             <span>
               <i className="mini-dot coral" />
