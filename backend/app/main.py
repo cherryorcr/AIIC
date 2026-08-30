@@ -17,6 +17,7 @@ from app.schemas.models import (
     AccountRegister,
     AnswerRequest,
     DocumentConfirmRequest,
+    GroupDiscussionAdvance,
     KnowledgeItemCreate,
     KnowledgeItemUpdate,
     JobCreate,
@@ -921,6 +922,35 @@ async def answer_turn(
     session_id: str, payload: AnswerRequest, request: Request, response: Response
 ) -> dict[str, Any]:
     return await _answer(session_id, payload, request, response)
+
+
+@app.post("/api/v1/sessions/{session_id}/advance")
+async def advance_session_topic(
+    session_id: str, request: Request, response: Response
+) -> dict[str, Any]:
+    _require_session_owner(session_id, request, response)
+    try:
+        return await interviews.advance_topic(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="session_not_found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/sessions/{session_id}/group/advance")
+async def advance_group_discussion(
+    session_id: str,
+    payload: GroupDiscussionAdvance,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _require_session_owner(session_id, request, response)
+    try:
+        return await interviews.advance_group_discussion(session_id, payload.interval_seconds)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="session_not_found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 async def _answer(

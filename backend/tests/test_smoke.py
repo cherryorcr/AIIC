@@ -3,6 +3,7 @@
 运行前安装 requirements-dev，并从项目根目录执行 pytest backend/tests。
 """
 
+import json
 import os
 import tempfile
 from datetime import datetime, timezone
@@ -34,7 +35,7 @@ def reset_database():
     db.init()
     with db._lock, db._conn:  # noqa: SLF001 - explicit test-only isolation
         for table in (
-            "feedback", "turns", "reports", "question_favorites", "sessions", "match_snapshots", "auth_sessions",
+            "feedback", "group_messages", "turns", "reports", "question_favorites", "sessions", "match_snapshots", "auth_sessions",
             "model_invocations", "user_profiles", "jobs", "users", "graph_edges",
             "question_skills", "questions", "skills", "sources",
             "candidate_documents",
@@ -88,6 +89,140 @@ def test_group_interview_returns_simulated_reaction():
         assert feedback["group_reaction"]["speaker"]
         assert 2 <= len(feedback["group_reactions"]) <= 3
         assert set(feedback["scores"]) == {"problem_framing", "collaboration", "consensus", "time_management"}
+
+
+def test_follow_ups_keep_the_same_root_until_explicit_topic_advance(monkeypatch):
+    """A model follow-up is a child of the current topic, not a new RAG hit."""
+    from app.main import router
+
+    async def fake_complete(task, *args, **kwargs):
+        if task == "evaluate":
+            return {
+                "ok": True,
+                "text": json.dumps(
+                    {
+                        "scores": {"correctness": 4, "complexity": 3, "tradeoff": 3, "debugging": 4},
+                        "evidence_quotes": ["我使用缓存把接口延迟降低了 20%"],
+                        "strengths": ["给出了量化结果"],
+                        "improvements": ["缓存一致性的取舍还不够具体"],
+                        "better_answer": "补充缓存策略、失效边界和压测证据。",
+                        "next_question": "你提到延迟降低了 20%，这个数据如何测量，缓存一致性又如何保证？",
+                        "next_action": "继续追问",
+                    },
+                    ensure_ascii=False,
+                ),
+                "provider": "test-strong-model",
+            }
+        return {"ok": False, "text": "", "provider": "test-fallback"}
+
+    monkeypatch.setattr(router, "complete", fake_complete)
+    with TestClient(app) as client:
+        started = client.post(
+            "/api/v1/sessions",
+            json={"mode": "technical", "role": "后端工程师", "job_text": "Python Redis PostgreSQL"},
+        ).json()
+        first_root = started["question_id"]
+        first = client.post(
+            f"/api/v1/sessions/{started['session_id']}/turns",
+            json={"question_id": first_root, "answer_text": "我使用缓存把接口延迟降低了 20%，并做了压测。"},
+        )
+        assert first.status_code == 200
+        follow_up = first.json()["next_question"]
+        assert follow_up["root_question_id"] == first_root
+        assert follow_up["follow_up_depth"] == 1
+        assert follow_up["question_id"] == f"{first_root}-f1"
+        assert "20%" in follow_up["question"]
+
+        second = client.post(
+            f"/api/v1/sessions/{started['session_id']}/turns",
+            json={"question_id": follow_up["question_id"], "answer_text": "我用 P95 对照压测，并采用短 TTL 降低不一致窗口。"},
+        )
+        assert second.status_code == 200
+        second_follow_up = second.json()["next_question"]
+        assert second_follow_up["root_question_id"] == first_root
+        assert second_follow_up["follow_up_depth"] == 2
+        assert second_follow_up["question_id"] == f"{first_root}-f2"
+
+        advanced = client.post(f"/api/v1/sessions/{started['session_id']}/advance")
+        assert advanced.status_code == 200
+        new_topic = advanced.json()["question"]
+        assert new_topic["follow_up_depth"] == 0
+        assert new_topic["root_question_id"] != first_root
+
+
+def test_group_participants_advance_without_user_answer_and_persist(monkeypatch):
+    """The browser timer can request one durable peer message at each interval."""
+    from app.main import router
+
+    calls = 0
+
+    async def fake_complete(task, *args, **kwargs):
+        nonlocal calls
+        if task == "group_discussion":
+            calls += 1
+            return {
+                "ok": True,
+                "text": json.dumps(
+                    {
+                        "speaker": "模拟队友 A",
+                        "role": "推进者",
+                        "message": f"第 {calls} 轮：我先回应上一位的判断，再补充一个量化标准。",
+                        "group_phase": "交叉讨论",
+                        "next_delay_seconds": 6,
+                    },
+                    ensure_ascii=False,
+                ),
+                "provider": "test-strong-model",
+            }
+        return {"ok": False, "text": "", "provider": "test-fallback"}
+
+    monkeypatch.setattr(router, "complete", fake_complete)
+    with TestClient(app) as client:
+        started = client.post(
+            "/api/v1/sessions",
+            json={"mode": "group", "role": "产品经理", "job_text": "协作、指标和优先级"},
+        ).json()
+        endpoint = f"/api/v1/sessions/{started['session_id']}/group/advance"
+        first = client.post(endpoint, json={"interval_seconds": 5})
+        second = client.post(endpoint, json={"interval_seconds": 5})
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert first.json()["speaker"] == "模拟队友 A"
+        # The service enforces stable personas and no immediate same-speaker repeat.
+        assert second.json()["speaker"] == "模拟队友 B"
+        assert first.json()["next_delay_seconds"] == 6
+
+        summary = client.get(f"/api/v1/sessions/{started['session_id']}/summary").json()
+        assert summary["summary"]["turn_count"] == 0
+        assert [item["message_id"] for item in summary["group_messages"]] == [
+            first.json()["message_id"], second.json()["message_id"],
+        ]
+
+
+def test_fallback_follow_up_is_anchored_to_answer_evidence(monkeypatch):
+    from app.main import router
+
+    async def no_model(*args, **kwargs):
+        return {"ok": False, "text": "", "provider": "fallback"}
+
+    monkeypatch.setattr(router, "complete", no_model)
+    with TestClient(app) as client:
+        started = client.post(
+            "/api/v1/sessions",
+            json={"mode": "technical", "role": "后端工程师", "job_text": "Python Redis"},
+        ).json()
+        answered = client.post(
+            f"/api/v1/sessions/{started['session_id']}/turns",
+            json={
+                "question_id": started["question_id"],
+                "answer_text": "我在 TechMatch 中用 Redis 缓存，把 P95 延迟降低了 20%。",
+            },
+        )
+        assert answered.status_code == 200
+        next_question = answered.json()["next_question"]
+        assert next_question["root_question_id"] == started["question_id"]
+        assert "TechMatch" in next_question["question"]
+        assert "20%" in next_question["question"]
 
 
 def test_revision_creates_child_turn_without_advancing_cursor():
@@ -1054,10 +1189,11 @@ def test_postgres_migration_baseline_is_checked_in():
     sql = migration.read_text(encoding="utf-8")
     for table in (
         "users", "auth_sessions", "user_profiles", "jobs", "sessions", "sources", "skills",
-        "questions", "question_skills", "graph_edges", "turns", "feedback",
+        "questions", "question_skills", "graph_edges", "turns", "group_messages", "feedback",
         "model_invocations", "question_favorites", "reports", "candidate_documents",
     ):
         assert f"CREATE TABLE IF NOT EXISTS {table}" in sql
     assert "ON CONFLICT (version) DO NOTHING" in sql
     migration_script = (Path(__file__).resolve().parents[1] / "scripts" / "migrate_postgres.py").read_text(encoding="utf-8")
     assert "boolean_columns" in migration_script
+    assert '"group_messages"' in migration_script

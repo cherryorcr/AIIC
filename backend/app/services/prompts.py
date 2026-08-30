@@ -55,15 +55,21 @@ def evaluation_prompt(
     answer: str,
     profile: dict[str, Any],
     rubric: list[str],
+    job_text: str = "",
+    recent_turns: list[dict[str, str]] | None = None,
+    root_question: str = "",
 ) -> list[dict[str, str]]:
     policy = policy_for(mode)
     payload = {
         "mode": policy["name"],
         "dimensions": policy["dimensions"],
         "question": question,
+        "root_question": root_question or question,
         "answer": answer,
         "profile": profile,
+        "job_description": job_text,
         "rubric": rubric,
+        "recent_turns": (recent_turns or [])[-4:],
     }
     schema = {
         "scores": {dimension: "0-5" for dimension in policy["dimensions"]},
@@ -71,7 +77,7 @@ def evaluation_prompt(
         "strengths": ["具体优点"],
         "improvements": ["可执行改进"],
         "better_answer": "不编造经历的回答结构示例",
-        "next_question": "可选追问",
+        "next_question": "必须紧扣本轮问题和回答中的一个具体原句或缺口，只追问一个点",
         "next_action": "重新回答或进入下一题",
     }
     if mode == "group":
@@ -98,8 +104,72 @@ def evaluation_prompt(
         {
             "role": "system",
             "content": (
-                "你是结构化面试评分器。不得补写用户没有说过的事实；缺失证据必须明确指出。只输出合法 JSON。"
+                "你是结构化面试评分器。不得补写用户没有说过的事实；缺失证据必须明确指出。"
+                "next_question 必须延续当前主题，明确引用或指向候选人刚才回答中的一个具体观点、数字、技术选择、经历细节或证据缺口；"
+                "不得突然切换到另一道知识题，也不得只重复原问题。优先追问因果、个人贡献、取舍依据、边界条件、验证证据或失败复盘。只输出合法 JSON。"
                 + ("群面还要模拟 2-3 名角色不同的队友各一段简短发言，并给出候选人下一步应回应的动作；同时保留 group_reaction 作为第一名队友兼容字段。" if mode == "group" else "")
+            ),
+        },
+        {"role": "user", "content": json.dumps({"input": payload, "output_schema": schema}, ensure_ascii=False)},
+    ]
+
+
+def group_discussion_prompt(
+    question: str,
+    profile: dict[str, Any],
+    job_text: str,
+    recent_turns: list[dict[str, Any]],
+    recent_messages: list[dict[str, Any]],
+    interval_seconds: int,
+) -> list[dict[str, str]]:
+    discussion_history = [
+        {
+            "speaker": "真实用户",
+            "role": "候选人",
+            "message": str(turn.get("answer_text") or turn.get("answer") or ""),
+            "created_at": str(turn.get("created_at") or ""),
+        }
+        for turn in recent_turns
+        if str(turn.get("answer_text") or turn.get("answer") or "").strip()
+    ]
+    discussion_history.extend(
+        {
+            "speaker": str(message.get("speaker") or "模拟队友"),
+            "role": str(message.get("role") or ""),
+            "message": str(message.get("message") or ""),
+            "created_at": str(message.get("created_at") or ""),
+        }
+        for message in recent_messages
+        if str(message.get("message") or "").strip()
+    )
+    discussion_history.sort(key=lambda item: item["created_at"])
+    payload = {
+        "topic": question,
+        "candidate_profile": profile,
+        "job_description": job_text,
+        "discussion_history": discussion_history[-12:],
+        "requested_interval_seconds": interval_seconds,
+        "participants": [
+            {"speaker": "模拟队友 A", "role": "推进者"},
+            {"speaker": "模拟队友 B", "role": "质疑者"},
+            {"speaker": "模拟队友 C", "role": "数据派"},
+        ],
+    }
+    schema = {
+        "speaker": "模拟队友 A/B/C 之一，避免与上一位重复",
+        "role": "推进者/质疑者/数据派",
+        "message": "40-100 字，回应上一位发言并推进同一讨论主题",
+        "group_phase": "观点陈述/交叉讨论/总结共识",
+        "next_delay_seconds": "4-20 之间的整数",
+    }
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你正在模拟真实无领导小组讨论中的一名候选人。即使真实用户暂时不发言，其他成员也会继续交流。"
+                "discussion_history 已按实际时间排序；每次只生成一名成员的一条新发言，必须直接回应其中最后一条消息的具体观点，"
+                "若最后一条来自真实用户，要先回应用户；否则回应上一名队友。允许赞同、质疑、补充数据或推动收敛，"
+                "但不得脱离原讨论题、不得代替真实用户发言、不得编造真实用户经历。只输出合法 JSON。"
             ),
         },
         {"role": "user", "content": json.dumps({"input": payload, "output_schema": schema}, ensure_ascii=False)},

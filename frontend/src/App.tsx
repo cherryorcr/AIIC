@@ -4,6 +4,8 @@ import { BrowserRouter, NavLink, Route, Routes, useLocation, useNavigate, useSea
 import type { LucideIcon } from "lucide-react";
 import {
   healthCheck,
+  advanceGroupDiscussion,
+  advanceSessionTopic,
   createTemporaryUser,
   getCurrentUser,
   getSessionSummary,
@@ -32,7 +34,7 @@ import {
   toggleFavorite,
   uploadDocument,
 } from "./api";
-import type { AlgorithmResult, AuthState, BackendQuestion, CandidateDocument, DocumentKind, Feedback as BackendFeedback, MatchResponse, SessionSummary, StartSessionResponse, UserProfile, WorkspaceOverview } from "./api";
+import type { AlgorithmResult, AuthState, BackendQuestion, CandidateDocument, DocumentKind, Feedback as BackendFeedback, GroupDiscussionMessage, MatchResponse, SessionSummary, StartSessionResponse, UserProfile, WorkspaceOverview } from "./api";
 import {
   AlertCircle,
   ArrowRight,
@@ -65,6 +67,7 @@ import {
   MessageSquareText,
   PanelLeftClose,
   PanelLeftOpen,
+  Pause,
   Play,
   Plus,
   RotateCcw,
@@ -855,12 +858,16 @@ function PracticePage() {
   const [sessionNotice, setSessionNotice] = useState("");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [answer, setAnswer] = useState("");
+  const [lastAnswerText, setLastAnswerText] = useState("");
   const [submitted, setSubmitted] = useState(false);
   const [panelsSwapped, setPanelsSwapped] = useState(false);
   const [algorithmSubmitted, setAlgorithmSubmitted] = useState(false);
   const [feedback, setFeedback] = useState<BackendFeedback | null>(null);
   const [conversation, setConversation] = useState<ConversationMessage[]>([]);
   const [groupPaused, setGroupPaused] = useState(false);
+  const [groupIntervalSeconds, setGroupIntervalSeconds] = useState(8);
+  const [groupGenerating, setGroupGenerating] = useState(false);
+  const [changingTopic, setChangingTopic] = useState(false);
   const [lastTurnId, setLastTurnId] = useState<string | null>(null);
   const [revisionOf, setRevisionOf] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
@@ -892,6 +899,7 @@ function PracticePage() {
     setSessionCompleted(false);
     setSessionNotice("");
     setAnswer("");
+    setLastAnswerText("");
     setRunResult(null);
     const fallback = questions.find((item) => item.mode === activeMode) || questions[0];
     setQuestion(fallback);
@@ -926,6 +934,7 @@ function PracticePage() {
         const current = (persisted as SessionSummary).current_question as BackendQuestion | null | undefined;
         const initialQuestion = current ? backendQuestionToQuestion(current, sessionMode as ModeId, fallback) : questionFromStart(data as StartSessionResponse, sessionMode as ModeId);
         setQuestion(initialQuestion);
+        const restoredGroupMessages = ((data as SessionSummary).group_messages || []) as GroupDiscussionMessage[];
         setConversation([
           {
             id: `assistant-${initialQuestion.id}-${Date.now()}`,
@@ -933,6 +942,13 @@ function PracticePage() {
             speaker: getModeLabel(sessionMode as ModeId),
             content: initialQuestion.prompt,
           },
+          ...restoredGroupMessages.map((message) => ({
+            id: message.message_id,
+            kind: "peer" as const,
+            speaker: message.speaker,
+            role: message.role,
+            content: message.message,
+          })),
         ]);
         setQuestionIndex(0);
       } else {
@@ -950,6 +966,52 @@ function PracticePage() {
       cancelled = true;
     };
   }, [activeMode]);
+
+  useEffect(() => {
+    if (activeMode !== "group" || !sessionId || groupPaused || loading || submitting) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const schedule = (delaySeconds: number) => {
+      if (cancelled) return;
+      timer = globalThis.setTimeout(() => void tick(), Math.max(4, delaySeconds) * 1000);
+    };
+    const tick = async () => {
+      if (cancelled) return;
+      setGroupGenerating(true);
+      try {
+        const message = await advanceGroupDiscussion(sessionId, groupIntervalSeconds);
+        if (!cancelled) {
+          setConversation((current) =>
+            current.some((item) => item.id === message.message_id)
+              ? current
+              : [
+                  ...current,
+                  {
+                    id: message.message_id,
+                    kind: "peer",
+                    speaker: message.speaker,
+                    role: message.role,
+                    content: message.message,
+                  },
+                ],
+          );
+          // The selected pace is the minimum gap. The model may deliberately
+          // slow down when a participant has made a dense or summary comment.
+          schedule(Math.max(groupIntervalSeconds, message.next_delay_seconds || groupIntervalSeconds));
+        }
+      } catch {
+        schedule(groupIntervalSeconds);
+      } finally {
+        if (!cancelled) setGroupGenerating(false);
+      }
+    };
+    schedule(groupIntervalSeconds);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) globalThis.clearTimeout(timer);
+      setGroupGenerating(false);
+    };
+  }, [activeMode, sessionId, groupPaused, groupIntervalSeconds, loading, submitting]);
 
   function changeMode(id: ModeId) {
     if (id !== activeMode) {
@@ -1001,35 +1063,50 @@ function PracticePage() {
       ]);
     }
   }
-  function pauseGroupAndReply() {
-    if (activeMode !== "group" || groupPaused || !submitted || !nextQuestionData) return;
-    const pendingQuestion = nextQuestionData;
-    setGroupPaused(true);
-    setQuestion(pendingQuestion);
-    setNextQuestionData(null);
-    setQuestionIndex((index) => index + 1);
-    setSubmitted(false);
-    setPanelsSwapped(false);
-    setRevisionOf(null);
-    setAnswer("");
+  function toggleGroupDiscussion() {
+    if (activeMode !== "group") return;
+    setGroupPaused((paused) => !paused);
+  }
+  async function changeTopic() {
+    if (!sessionId || changingTopic) return;
+    setChangingTopic(true);
     setError("");
-    // Keep the previous feedback visible on the right while the candidate
-    // pauses the simulated participants and prepares a response.
+    try {
+      const result = await advanceSessionTopic(sessionId);
+      const selected = backendQuestionToQuestion(result.question, activeMode, question);
+      setQuestion(selected);
+      setNextQuestionData(null);
+      setQuestionIndex((index) => index + 1);
+      setSubmitted(false);
+      setFeedback(null);
+      setRevisionOf(null);
+      setLastAnswerText("");
+      setAnswer("");
+      setConversation((current) => [
+        ...current,
+        { id: `assistant-topic-${selected.id}-${Date.now()}`, kind: "assistant", speaker: mode.label, content: `我们切换到一个新选题：${selected.prompt}` },
+      ]);
+    } catch (cause) {
+      setError(`切换新题失败：${cause instanceof Error ? cause.message : "请稍后重试"}`);
+    } finally {
+      setChangingTopic(false);
+    }
   }
   function supplementAnswer() {
-    if (!lastTurnId || !answer.trim()) return;
+    if (!lastTurnId || !lastAnswerText.trim()) return;
     setRevisionOf(lastTurnId);
     setSubmitted(false);
     setPanelsSwapped(false);
     setFeedback(null);
     setNextQuestionData(null);
     setError("");
-    setAnswer((current) => `${current.trim()}\n\n补充回答：`);
+    setAnswer(`${lastAnswerText.trim()}\n\n补充回答：`);
   }
   async function submitAnswer() {
     if (answer.trim().length < 8 || !sessionId || submitting) return;
     const answerText = answer.trim();
     const wasRevision = Boolean(revisionOf);
+    const wasGroupPaused = groupPaused;
     setSubmitting(true);
     setError("");
     try {
@@ -1040,36 +1117,33 @@ function PracticePage() {
         answer_mode: revisionOf ? "supplement" : "answer",
       });
       setFeedback(result.feedback);
-      setSubmitted(true);
-      if (activeMode === "group") setGroupPaused(false);
+      const isGroupTurn = activeMode === "group";
+      setSubmitted(!isGroupTurn);
+      setLastAnswerText(answerText);
+      // A paused discussion stays paused after the candidate responds. The
+      // user explicitly controls when the simulated teammates resume.
+      if (isGroupTurn && !wasGroupPaused) setGroupPaused(false);
       setLastTurnId(result.turn_id);
       setRevisionOf(null);
       const next = result.next_question ? backendQuestionToQuestion(result.next_question, activeMode, question) : null;
-      setNextQuestionData(next);
+      if (isGroupTurn && next) {
+        setQuestion(next);
+        setNextQuestionData(null);
+        setQuestionIndex((index) => index + 1);
+        setAnswer("");
+      } else {
+        setNextQuestionData(next);
+      }
       setConversation((current) => {
         const messages: ConversationMessage[] = [
           ...current,
           { id: `user-${result.turn_id}`, kind: "user", speaker: "我", content: answerText },
         ];
-        const reactions = result.feedback.group_reactions?.length
-          ? result.feedback.group_reactions
-          : result.feedback.group_reaction
-            ? [result.feedback.group_reaction]
-            : [];
-        reactions.forEach((reaction, index) => {
-          if (reaction.message) {
-            messages.push({
-              id: `peer-${result.turn_id}-${index}`,
-              kind: "peer",
-              speaker: reaction.speaker || `模拟队友 ${String.fromCharCode(65 + index)}`,
-              role: reaction.role,
-              content: reaction.message,
-            });
-          }
-        });
-        // A revision receives the same cursor; do not duplicate the current
-        // prompt. In a group interview, participant messages appear before
-        // the moderator's next prompt to preserve a natural chat sequence.
+        // Group participants are generated one at a time by the autonomous
+        // discussion timer. Do not inject the evaluator's optional reaction
+        // suggestions here, otherwise several peers would speak at once and
+        // bypass the pause/pace controls.
+        // A revision receives the same cursor; do not duplicate the prompt.
         if (next && (!wasRevision || next.id !== question.id)) {
           messages.push({ id: `assistant-${next.id}-${result.turn_id}`, kind: "assistant", speaker: mode.label, content: next.prompt });
         }
@@ -1086,11 +1160,22 @@ function PracticePage() {
         const persistedTurn = [...(persisted.turns || [])].reverse().find((item) => String(item.question_id || "") === question.id && item.feedback);
         if (persistedTurn?.feedback) {
           setFeedback(persistedTurn.feedback as BackendFeedback);
-          setSubmitted(true);
+          setSubmitted(activeMode !== "group");
+          setLastAnswerText(answerText);
+          if (activeMode === "group") {
+            if (!wasGroupPaused) setGroupPaused(false);
+            setAnswer("");
+          }
           setLastTurnId(String(persistedTurn.id || ""));
           setRevisionOf(null);
           const current = persisted.current_question as BackendQuestion | null | undefined;
-          setNextQuestionData(current ? backendQuestionToQuestion(current, activeMode, question) : null);
+          const reconciled = current ? backendQuestionToQuestion(current, activeMode, question) : null;
+          if (activeMode === "group" && reconciled) {
+            setQuestion(reconciled);
+            setNextQuestionData(null);
+          } else {
+            setNextQuestionData(reconciled);
+          }
           setError("");
           return;
         }
@@ -1154,14 +1239,16 @@ function PracticePage() {
             type="button"
             aria-label="重置当前训练"
             onClick={() => {
-    setSubmitted(false);
-    setLastTurnId(null);
-    setRevisionOf(null);
+              setSubmitted(false);
+              setLastTurnId(null);
+              setLastAnswerText("");
+              setRevisionOf(null);
               setPanelsSwapped(false);
-    setFeedback(null);
+              setFeedback(null);
               setAnswer("");
               setRunResult(null);
               setError("");
+              setGroupGenerating(false);
             }}
           >
             <RotateCcw size={17} />
@@ -1337,9 +1424,14 @@ function PracticePage() {
             revisionOf={revisionOf}
             nextQuestionData={nextQuestionData}
             groupPaused={groupPaused}
-            onToggleGroupPause={pauseGroupAndReply}
+            groupIntervalSeconds={groupIntervalSeconds}
+            setGroupIntervalSeconds={setGroupIntervalSeconds}
+            groupGenerating={groupGenerating}
+            changingTopic={changingTopic}
+            onToggleGroupPause={toggleGroupDiscussion}
             onSubmit={submitAnswer}
             onNext={nextQuestion}
+            onChangeTopic={changeTopic}
           />
         )}
         {activeMode === "algorithm" ? (
@@ -1349,6 +1441,9 @@ function PracticePage() {
             submitted={submitted || Boolean(feedback)}
             feedback={feedback}
             question={question}
+            activeMode={activeMode}
+            hasNextQuestion={Boolean(nextQuestionData)}
+            changingTopic={changingTopic}
             onRetry={() => {
               setSubmitted(false);
               setPanelsSwapped(false);
@@ -1362,6 +1457,7 @@ function PracticePage() {
             }}
             onSupplement={lastTurnId ? supplementAnswer : undefined}
             onNext={nextQuestion}
+            onChangeTopic={changeTopic}
           />
         )}
       </div>
@@ -1381,9 +1477,14 @@ function ConversationPanel({
   revisionOf,
   nextQuestionData,
   groupPaused,
+  groupIntervalSeconds,
+  setGroupIntervalSeconds,
+  groupGenerating,
+  changingTopic,
   onToggleGroupPause,
   onSubmit,
   onNext,
+  onChangeTopic,
 }: {
   mode: string;
   activeMode: ModeId;
@@ -1396,9 +1497,14 @@ function ConversationPanel({
   revisionOf: string | null;
   nextQuestionData: Question | null;
   groupPaused: boolean;
+  groupIntervalSeconds: number;
+  setGroupIntervalSeconds: (value: number) => void;
+  groupGenerating: boolean;
+  changingTopic: boolean;
   onToggleGroupPause: () => void;
   onSubmit: () => void;
   onNext: () => void;
+  onChangeTopic: () => void;
 }) {
   return (
     <section className={`conversation-panel ${activeMode === "group" ? "group-conversation" : ""}`}>
@@ -1409,15 +1515,30 @@ function ConversationPanel({
           <small>{question.personalized ? "已结合岗位 JD 和你的简历生成" : `围绕一个选题展开多轮回答 · ${mode}`}</small>
         </div>
         {activeMode === "group" ? (
-          <button
-            className={`secondary-button group-pause-button ${groupPaused ? "active" : ""}`}
-            type="button"
-            onClick={onToggleGroupPause}
-            disabled={groupPaused || !submitted || !nextQuestionData}
-            aria-pressed={groupPaused}
-          >
-            {groupPaused ? "队友已暂停" : submitted && nextQuestionData ? "暂停并发言" : "等待你的回答"}
-          </button>
+          <div className="group-discussion-controls">
+            <label className="group-pace-control">
+              <span>队友间隔</span>
+              <select
+                value={groupIntervalSeconds}
+                onChange={(event) => setGroupIntervalSeconds(Number(event.target.value))}
+                aria-label="AI 队友交流间隔"
+              >
+                <option value={5}>5 秒</option>
+                <option value={8}>8 秒</option>
+                <option value={12}>12 秒</option>
+              </select>
+            </label>
+            <button
+              className={`secondary-button group-pause-button ${groupPaused ? "active" : ""}`}
+              type="button"
+              onClick={onToggleGroupPause}
+              disabled={submitting}
+              aria-pressed={groupPaused}
+            >
+              {groupPaused ? <Play size={14} /> : <Pause size={14} />}
+              {groupPaused ? "继续讨论" : "暂停队友"}
+            </button>
+          </div>
         ) : null}
       </div>
       <div className="chat-thread" aria-live="polite">
@@ -1433,8 +1554,8 @@ function ConversationPanel({
             </div>
           </div>
         ))}
-        {submitting ? (
-          <div className="chat-typing"><span /> <span /> <span /> 模型正在整理下一步问题…</div>
+        {submitting || groupGenerating ? (
+          <div className="chat-typing"><span /> <span /> <span /> {submitting ? "模型正在分析你的回答…" : "模拟队友正在组织观点…"}</div>
         ) : null}
       </div>
       {activeMode !== "group" && nextQuestionData && submitted ? (
@@ -1453,14 +1574,21 @@ function ConversationPanel({
           className="chat-input"
           value={answer}
           onChange={(event) => setAnswer(event.target.value)}
-          disabled={submitted || submitting}
+          disabled={submitting || (activeMode !== "group" && submitted)}
           placeholder={activeMode === "group" ? "回应队友观点，推进讨论或提出新的判断依据…" : activeMode === "stress" ? "先说结论，再给一个事实。注意控制在 30 秒内…" : "继续回答当前问题，模型会在右侧给出建议并在中间追问…"}
         />
         <div className="chat-composer-actions">
-          <span><CircleHelp size={14} /> {submitted ? "可在右侧选择修改或进入追问" : "回答提交后会保留在对话中"}</span>
-          <button className="primary-button" type="button" disabled={answer.trim().length < 8 || submitted || submitting} onClick={onSubmit}>
+          <span><CircleHelp size={14} /> {activeMode === "group" ? (groupPaused ? "队友已暂停，你可以从容回应；提交后自动恢复讨论" : "你可随时插话，也可以先暂停队友") : submitted ? "可在右侧选择修改、继续追问或换新题" : "回答提交后会保留在对话中"}</span>
+          <div className="chat-composer-buttons">
+            {activeMode === "group" ? (
+              <button className="secondary-button" type="button" disabled={changingTopic || submitting} onClick={onChangeTopic}>
+                {changingTopic ? "切换中…" : "换议题"}
+              </button>
+            ) : null}
+            <button className="primary-button" type="button" disabled={answer.trim().length < 8 || submitting || (activeMode !== "group" && submitted)} onClick={onSubmit}>
             {submitting ? <><Gauge size={16} className="spin" /> 分析中…</> : <><Send size={16} /> 发送回答</>}
-          </button>
+            </button>
+          </div>
         </div>
       </div>
     </section>
@@ -1570,7 +1698,7 @@ const scoreLabel: Record<string, string> = {
   time_management: "时间管理",
 };
 
-function FeedbackPanel({ submitted, feedback, question, onRetry, onSupplement, onNext }: { submitted: boolean; feedback: BackendFeedback | null; question: Question; onRetry: () => void; onSupplement?: () => void; onNext: () => void }) {
+function FeedbackPanel({ submitted, feedback, question, activeMode, hasNextQuestion, changingTopic, onRetry, onSupplement, onNext, onChangeTopic }: { submitted: boolean; feedback: BackendFeedback | null; question: Question; activeMode: ModeId; hasNextQuestion: boolean; changingTopic: boolean; onRetry: () => void; onSupplement?: () => void; onNext: () => void; onChangeTopic: () => void }) {
   const scoreEntries = feedback ? Object.entries(feedback.scores) : [];
   const average = scoreEntries.length ? Math.round((scoreEntries.reduce((sum, [, value]) => sum + Number(value), 0) / scoreEntries.length) * 20) : 0;
   const groupReactions = feedback?.group_reactions?.length ? feedback.group_reactions : feedback?.group_reaction ? [feedback.group_reaction] : [];
@@ -1651,8 +1779,13 @@ function FeedbackPanel({ submitted, feedback, question, onRetry, onSupplement, o
                 补充/修订
               </button>
             ) : null}
-            <button className="primary-button" type="button" onClick={onNext}>
-              下一题 <ArrowRight size={15} />
+            {activeMode !== "group" && hasNextQuestion ? (
+              <button className="primary-button" type="button" onClick={onNext}>
+                继续追问 <MessageSquareText size={15} />
+              </button>
+            ) : null}
+            <button className={activeMode !== "group" && hasNextQuestion ? "secondary-button" : "primary-button"} type="button" onClick={onChangeTopic} disabled={changingTopic}>
+              {changingTopic ? "切换中…" : activeMode === "group" ? "换一个议题" : "换新题"} <ArrowRight size={15} />
             </button>
           </div>
         </>

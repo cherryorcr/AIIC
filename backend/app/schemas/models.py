@@ -33,6 +33,10 @@ class SessionCreate(BaseModel):
     job_id: str | None = None
 
 
+class GroupDiscussionAdvance(BaseModel):
+    interval_seconds: int = Field(default=8, ge=4, le=20)
+
+
 class TemporaryUserCreate(BaseModel):
     """Create a new isolated temporary user (client IDs are ignored)."""
 

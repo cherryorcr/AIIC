@@ -77,6 +77,21 @@ CREATE TABLE IF NOT EXISTS sessions (
     updated_at TIMESTAMPTZ NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS group_messages (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    speaker TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT '',
+    message TEXT NOT NULL,
+    group_phase TEXT NOT NULL DEFAULT '',
+    next_delay_seconds INTEGER NOT NULL DEFAULT 8,
+    provider TEXT NOT NULL DEFAULT 'fallback',
+    created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_messages_session_created
+    ON group_messages(session_id, created_at);
+
 CREATE TABLE IF NOT EXISTS match_snapshots (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -232,6 +247,8 @@ CREATE INDEX IF NOT EXISTS idx_questions_active ON questions(is_active);
 CREATE INDEX IF NOT EXISTS idx_edges_from ON graph_edges(from_type, from_id);
 CREATE INDEX IF NOT EXISTS idx_favorites_user ON question_favorites(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_group_messages_session_created
+    ON group_messages(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_candidate_documents_user ON candidate_documents(user_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, expires_at);
 
@@ -255,4 +272,7 @@ VALUES (6, 'registered accounts and hashed authentication sessions', NOW())
 ON CONFLICT (version) DO NOTHING;
 INSERT INTO schema_migrations(version, description, applied_at)
 VALUES (7, 'persisted resume and job match score snapshots', NOW())
+ON CONFLICT (version) DO NOTHING;
+INSERT INTO schema_migrations(version, description, applied_at)
+VALUES (8, 'autonomous group discussion messages', NOW())
 ON CONFLICT (version) DO NOTHING;

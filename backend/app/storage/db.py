@@ -218,6 +218,18 @@ class Database:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS group_messages (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    speaker TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT '',
+                    message TEXT NOT NULL,
+                    group_phase TEXT NOT NULL DEFAULT '',
+                    next_delay_seconds INTEGER NOT NULL DEFAULT 8,
+                    provider TEXT NOT NULL DEFAULT 'fallback',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                );
                 CREATE TABLE IF NOT EXISTS turns (
                     id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL,
@@ -410,6 +422,7 @@ class Database:
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
+                CREATE INDEX IF NOT EXISTS idx_group_messages_session_created ON group_messages(session_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs(user_id, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_match_snapshots_lookup ON match_snapshots(user_id, target_key, input_hash, scoring_version);
                 CREATE INDEX IF NOT EXISTS idx_reports_user ON reports(user_id, updated_at);
@@ -485,6 +498,10 @@ class Database:
             self._conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, description, applied_at) VALUES (?, ?, ?)",
                 (7, "persisted resume and job match score snapshots", utc_now()),
+            )
+            self._conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, description, applied_at) VALUES (?, ?, ?)",
+                (8, "autonomous group discussion messages", utc_now()),
             )
 
     def seed_questions(self, items: list[dict[str, Any]], *, prune: bool = False) -> int:
@@ -769,6 +786,45 @@ class Database:
             result["user_profile"] = decode_json(result.pop("profile_json"), {})
             result["current_question"] = decode_json(result.pop("current_question_json"), None)
             result["matched_skills"] = decode_json(result.pop("matched_skills_json"), [])
+            return result
+
+    def save_group_message(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO group_messages
+                (id, session_id, speaker, role, message, group_phase, next_delay_seconds, provider, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    speaker=excluded.speaker, role=excluded.role, message=excluded.message,
+                    group_phase=excluded.group_phase, next_delay_seconds=excluded.next_delay_seconds,
+                    provider=excluded.provider
+                """,
+                (
+                    payload["message_id"], payload["session_id"], payload.get("speaker", "模拟队友"),
+                    payload.get("role", ""), payload.get("message", ""), payload.get("group_phase", ""),
+                    int(payload.get("next_delay_seconds", 8)), payload.get("provider", "fallback"),
+                    payload.get("created_at", utc_now()),
+                ),
+            )
+        return dict(payload)
+
+    def list_group_messages(self, session_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, session_id, speaker, role, message, group_phase,
+                       next_delay_seconds, provider, created_at
+                FROM group_messages WHERE session_id = ?
+                ORDER BY created_at ASC LIMIT ?
+                """,
+                (session_id, max(1, min(int(limit), 500))),
+            ).fetchall()
+            result = []
+            for row in rows:
+                item = dict(row)
+                item["message_id"] = item.pop("id")
+                result.append(item)
             return result
 
     # ------------------------------------------------------------------

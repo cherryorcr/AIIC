@@ -14,6 +14,10 @@ export type BackendQuestion = {
   source_question_id?: string;
   personalization_basis?: string[];
   generation_provider?: string;
+  root_question_id?: string;
+  root_question?: string;
+  follow_up_depth?: number;
+  is_follow_up?: boolean;
   difficulty?: string;
   source_refs?: string[];
   source_confidence?: string;
@@ -99,6 +103,7 @@ export type SessionSummary = {
   created_at?: string;
   updated_at?: string;
   turns?: Array<Record<string, unknown>>;
+  group_messages?: GroupDiscussionMessage[];
   matched_skills?: string[];
   session?: {
     session_id?: string;
@@ -115,6 +120,18 @@ export type SessionSummary = {
     [key: string]: unknown;
   };
   [key: string]: unknown;
+};
+
+export type GroupDiscussionMessage = {
+  message_id: string;
+  session_id: string;
+  speaker: string;
+  role?: string;
+  message: string;
+  group_phase?: string;
+  next_delay_seconds: number;
+  provider?: string;
+  created_at?: string;
 };
 
 export type JobRecord = {
@@ -354,6 +371,22 @@ export function submitTurn(
     notifyWorkspaceUpdated();
     return result;
   });
+}
+
+export function advanceSessionTopic(sessionId: string) {
+  return request<{ session_id: string; question: BackendQuestion; status: string }>(
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/advance`,
+    { method: "POST", body: JSON.stringify({}) },
+    { timeoutMs: 120000, retries: 0 },
+  );
+}
+
+export function advanceGroupDiscussion(sessionId: string, intervalSeconds: number) {
+  return request<GroupDiscussionMessage>(
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/group/advance`,
+    { method: "POST", body: JSON.stringify({ interval_seconds: intervalSeconds }) },
+    { timeoutMs: 120000, retries: 0 },
+  );
 }
 
 export function runAlgorithm(
