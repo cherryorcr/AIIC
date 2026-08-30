@@ -27,6 +27,12 @@ The deployed backend uses PostgreSQL and seeds `data/approved-dataset.json`.
 Secrets are stored only in `/home/ubuntu/aiic/backend/.env` and
 `/home/ubuntu/aiic/secrets/`, with mode `0600`.
 
+The challenge endpoint currently uses plain HTTP on port 8080, so its Compose
+default keeps `AUTH_COOKIE_SECURE=false`. After placing the frontend behind an
+HTTPS hostname, set `AUTH_COOKIE_SECURE=true` in the backend environment and
+recreate the backend container. Authentication cookies are HttpOnly and
+SameSite=Lax; raw user IDs are never accepted as credentials.
+
 ## GPU host checks
 
 ```bash

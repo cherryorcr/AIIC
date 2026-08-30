@@ -33,7 +33,7 @@ def reset_database():
     db.init()
     with db._lock, db._conn:  # noqa: SLF001 - explicit test-only isolation
         for table in (
-            "feedback", "turns", "reports", "question_favorites", "sessions",
+            "feedback", "turns", "reports", "question_favorites", "sessions", "auth_sessions",
             "model_invocations", "user_profiles", "jobs", "users", "graph_edges",
             "question_skills", "questions", "skills", "sources",
             "candidate_documents",
@@ -228,24 +228,119 @@ def test_user_profile_job_favorite_history_and_report_persist():
     with TestClient(app) as client:
         user = client.post("/api/v1/users/temporary", json={"display_name": "测试用户"})
         assert user.status_code == 200
-        headers = {"X-User-Id": user.json()["user"]["id"]}
         profile = client.put(
-            "/api/v1/profile", headers=headers,
+            "/api/v1/profile",
             json={"skills": ["Python"], "projects": ["TechMatch"], "experience": "后端"},
         )
         assert profile.status_code == 200
         job = client.post(
-            "/api/v1/jobs", headers=headers,
+            "/api/v1/jobs",
             json={"title": "后端工程师", "jd_text": "Python FastAPI PostgreSQL"},
         )
         assert job.status_code == 200
         assert "python" in [x.lower() for x in job.json()["job"]["skills"]]
-        favorite = client.post("/api/v1/questions/PUB-BEH-AMAZON-001/favorite", headers=headers, json={"favorite": True})
+        favorite = client.post("/api/v1/questions/PUB-BEH-AMAZON-001/favorite", json={"favorite": True})
         assert favorite.status_code == 200
-        assert any(item["id"] == "PUB-BEH-AMAZON-001" for item in client.get("/api/v1/favorites", headers=headers).json()["items"])
-        report = client.post("/api/v1/reports", headers=headers, json={"title": "回归报告", "payload": {"score": 4}})
+        assert any(item["id"] == "PUB-BEH-AMAZON-001" for item in client.get("/api/v1/favorites").json()["items"])
+        report = client.post("/api/v1/reports", json={"title": "回归报告", "payload": {"score": 4}})
         assert report.status_code == 200
-        assert any(item["title"] == "回归报告" for item in client.get("/api/v1/reports", headers=headers).json()["reports"])
+        assert any(item["title"] == "回归报告" for item in client.get("/api/v1/reports").json()["reports"])
+
+
+def test_registered_accounts_keep_profiles_jobs_readiness_and_sessions_isolated():
+    with TestClient(app) as owner, TestClient(app) as other:
+        guest = owner.get("/api/v1/auth/me")
+        assert guest.status_code == 200
+        guest_id = guest.json()["user"]["id"]
+        assert guest.json()["authenticated"] is False
+
+        assert owner.put(
+            "/api/v1/profile",
+            json={
+                "full_name": "张三",
+                "headline": "后端开发工程师",
+                "skills": ["Python", "FastAPI"],
+                "projects": ["TechMatch"],
+                "experience": "两年后端开发",
+            },
+        ).status_code == 200
+        owner_job = owner.post(
+            "/api/v1/jobs",
+            json={"title": "后端开发工程师", "role": "后端开发工程师", "jd_text": "Python FastAPI PostgreSQL"},
+        ).json()["job"]
+        registered = owner.post(
+            "/api/v1/auth/register",
+            json={"display_name": "张三", "email": "owner@example.com", "password": "safe-pass-123"},
+        )
+        assert registered.status_code == 201
+        assert registered.json()["user"]["id"] == guest_id
+        assert registered.json()["user"]["is_temporary"] is False
+        assert "password_hash" not in registered.text
+
+        started = owner.post(
+            "/api/v1/sessions",
+            json={"mode": "technical", "role": "后端开发工程师", "job_id": owner_job["id"]},
+        )
+        assert started.status_code == 200
+        session_id = started.json()["session_id"]
+        question_id = started.json()["question_id"]
+        owner_report = owner.post(
+            "/api/v1/reports",
+            json={"session_id": session_id, "title": "账户一报告", "payload": {"score": 4}},
+        ).json()["report"]
+
+        other_registered = other.post(
+            "/api/v1/auth/register",
+            json={"display_name": "李四", "email": "other@example.com", "password": "other-pass-123"},
+        )
+        assert other_registered.status_code == 201
+        assert other.put(
+            "/api/v1/profile", json={"full_name": "李四", "skills": ["Java"], "projects": []}
+        ).status_code == 200
+
+        assert other.get(f"/api/v1/jobs/{owner_job['id']}").status_code == 404
+        assert other.get(f"/api/v1/sessions/{session_id}").status_code == 404
+        assert other.get(f"/api/v1/sessions/{session_id}/summary").status_code == 404
+        assert other.get(f"/api/v1/sessions/{session_id}/events").status_code == 404
+        assert other.post(f"/api/v1/sessions/{session_id}/match", json={"filters": {}}).status_code == 404
+        assert other.post(
+            f"/api/v1/sessions/{session_id}/turns",
+            json={"question_id": question_id, "answer_text": "越权回答"},
+        ).status_code == 404
+        assert other.post(
+            f"/api/v1/sessions/{session_id}/algorithm/run",
+            json={"question_id": question_id, "code": "def solution(): return 1"},
+        ).status_code == 404
+        assert other.post(f"/api/v1/sessions/{session_id}/complete").status_code == 404
+        assert other.get(f"/api/v1/reports/{owner_report['id']}").status_code == 404
+        assert other.post(
+            "/api/v1/reports", json={"session_id": session_id, "title": "越权报告"}
+        ).status_code == 404
+        spoofed = other.get("/api/v1/profile", headers={"X-User-Id": guest_id})
+        assert spoofed.status_code == 200
+        assert spoofed.json()["profile"]["full_name"] == "李四"
+
+        owner_overview = owner.get("/api/v1/workspace/overview").json()
+        other_overview = other.get("/api/v1/workspace/overview").json()
+        assert owner_overview["user_id"] != other_overview["user_id"]
+        assert owner_overview["counts"]["jobs"] == 1
+        assert owner_overview["counts"]["sessions"] == 1
+        assert other_overview["counts"]["jobs"] == 0
+        assert other_overview["counts"]["sessions"] == 0
+        assert "postgresql" in owner_overview["readiness"]["skill_gaps"]
+
+        assert owner.post("/api/v1/auth/logout").status_code == 200
+        assert owner.post(
+            "/api/v1/auth/login",
+            json={"email": "owner@example.com", "password": "wrong-password"},
+        ).status_code == 401
+        login = owner.post(
+            "/api/v1/auth/login",
+            json={"email": "OWNER@example.com", "password": "safe-pass-123"},
+        )
+        assert login.status_code == 200
+        assert owner.get("/api/v1/profile").json()["profile"]["full_name"] == "张三"
+        assert owner.get("/api/v1/workspace/overview").json()["counts"]["sessions"] == 1
 
 
 def test_model_fallback_is_recorded_with_telemetry():
@@ -298,14 +393,12 @@ def test_session_can_be_completed_and_reported():
 
 
 def test_candidate_document_upload_parse_confirm_and_ownership():
-    with TestClient(app) as client:
+    with TestClient(app) as client, TestClient(app) as other_client:
         created = client.post("/api/v1/users/temporary", json={"display_name": "资料用户"})
         assert created.status_code == 200
         uid = created.json()["user"]["id"]
-        headers = {"X-User-Id": uid}
         upload = client.post(
             "/api/v1/documents/parse",
-            headers=headers,
             files={"file": ("resume.txt", "张三\\nPython FastAPI\\nTechMatch 项目", "text/plain")},
             data={"kind": "resume"},
         )
@@ -315,21 +408,22 @@ def test_candidate_document_upload_parse_confirm_and_ownership():
         assert document["extracted_text"].startswith("张三")
         assert "raw" not in document
         did = document["id"]
-        listed = client.get("/api/v1/documents", headers=headers)
+        listed = client.get("/api/v1/documents")
         assert listed.status_code == 200 and listed.json()["documents"]
         confirmed = client.post(
             f"/api/v1/documents/{did}/confirm",
-            headers=headers,
             json={"parsed": {"profile": {"full_name": "张三", "skills": ["Python"], "projects": ["TechMatch"]}}},
         )
         assert confirmed.status_code == 200
         assert confirmed.json()["status"] == "confirmed"
-        profile = client.get("/api/v1/profile", headers=headers).json()["profile"]
+        profile = client.get("/api/v1/profile").json()["profile"]
         assert profile["full_name"] == "张三"
-        other = client.post("/api/v1/users/temporary", json={"display_name": "其他用户"})
-        other_headers = {"X-User-Id": other.json()["user"]["id"]}
-        assert client.get(f"/api/v1/documents/{did}", headers=other_headers).status_code == 404
-        assert client.delete(f"/api/v1/documents/{did}", headers=headers).status_code == 200
+        other = other_client.post("/api/v1/users/temporary", json={"display_name": "其他用户"})
+        assert other.status_code == 200
+        assert other_client.get(f"/api/v1/documents/{did}").status_code == 404
+        # A raw user ID is no longer accepted as proof of identity.
+        assert other_client.get(f"/api/v1/documents/{did}", headers={"X-User-Id": uid}).status_code == 404
+        assert client.delete(f"/api/v1/documents/{did}").status_code == 200
 
 
 def test_candidate_document_rejects_unsupported_and_oversized_uploads():
@@ -352,7 +446,7 @@ def test_postgres_migration_baseline_is_checked_in():
     migration = Path(__file__).resolve().parents[1] / "migrations" / "001_postgres_schema.sql"
     sql = migration.read_text(encoding="utf-8")
     for table in (
-        "users", "user_profiles", "jobs", "sessions", "sources", "skills",
+        "users", "auth_sessions", "user_profiles", "jobs", "sessions", "sources", "skills",
         "questions", "question_skills", "graph_edges", "turns", "feedback",
         "model_invocations", "question_favorites", "reports", "candidate_documents",
     ):

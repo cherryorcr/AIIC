@@ -63,7 +63,7 @@ def _copy_sqlite(cur, sqlite_path: Path) -> int:
     from psycopg.types.json import Json
 
     tables = [
-        "schema_migrations", "users", "user_profiles", "jobs", "sessions",
+        "schema_migrations", "users", "auth_sessions", "user_profiles", "jobs", "sessions",
         "sources", "skills", "questions", "question_skills", "graph_edges",
         "question_favorites", "turns", "feedback", "model_invocations", "reports",
         "candidate_documents",

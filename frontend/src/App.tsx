@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { ReactNode } from "react";
+import type { FormEvent, ReactNode } from "react";
 import {
   BrowserRouter,
   NavLink,
@@ -12,7 +12,10 @@ import {
 import type { LucideIcon } from "lucide-react";
 import {
   healthCheck,
+  createTemporaryUser,
+  getCurrentUser,
   getSessionSummary,
+  getWorkspaceOverview,
   listFavorites,
   listJobs,
   listKnowledgeItems,
@@ -20,6 +23,8 @@ import {
   listSessionHistory,
   loadFavorites,
   loadUserProfile,
+  loginAccount,
+  logoutAccount,
   completeSession,
   confirmDocument,
   deleteDocument,
@@ -27,6 +32,7 @@ import {
   previewMatch,
   queueQuestion,
   runAlgorithm,
+  registerAccount,
   saveUserProfile,
   startSession,
   submitTurn,
@@ -35,6 +41,7 @@ import {
 } from "./api";
 import type {
   AlgorithmResult,
+  AuthState,
   BackendQuestion,
   CandidateDocument,
   DocumentKind,
@@ -43,6 +50,7 @@ import type {
   SessionSummary,
   StartSessionResponse,
   UserProfile,
+  WorkspaceOverview,
 } from "./api";
 import {
   AlertCircle,
@@ -67,6 +75,10 @@ import {
   GitBranch,
   LayoutDashboard,
   LibraryBig,
+  LockKeyhole,
+  LogIn,
+  LogOut,
+  Mail,
   Menu,
   MessageSquareText,
   PanelLeftClose,
@@ -85,6 +97,7 @@ import {
   TimerReset,
   Trash2,
   UploadCloud,
+  UserRound,
   X,
 } from "lucide-react";
 
@@ -293,43 +306,54 @@ const navItems: Array<{
   { label: "训练报告", path: "/reports", Icon: BarChart3 },
 ];
 
-const recentSessions = [
-  {
-    title: "后端开发工程师 · 技术面",
-    mode: "技术面",
-    score: 82,
-    date: "今天 09:40",
-    accent: "blue",
-  },
-  {
-    title: "算法工程师 · 算法面",
-    mode: "算法面",
-    score: 74,
-    date: "昨天 20:15",
-    accent: "purple",
-  },
-  {
-    title: "数据分析师 · 案例面",
-    mode: "案例面",
-    score: 88,
-    date: "08 月 28 日",
-    accent: "amber",
-  },
-];
+type DashboardSession = {
+  title: string;
+  mode: string;
+  score: number | null;
+  date: string;
+  accent: string;
+};
 
 function App() {
   return (
     <BrowserRouter>
-      <AppShell />
+      <AuthBootstrap />
     </BrowserRouter>
   );
 }
 
-function AppShell() {
+function AuthBootstrap() {
+  const [auth, setAuth] = useState<AuthState | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    getCurrentUser()
+      .then(setAuth)
+      .catch((cause) => setError(cause instanceof Error ? cause.message : "用户服务暂不可用"));
+  }, []);
+  if (!auth) {
+    return (
+      <div className="auth-loading">
+        <BrainCircuit size={30} />
+        <strong>{error || "正在加载你的独立工作区..."}</strong>
+        {error ? (
+          <button className="secondary-button" type="button" onClick={() => globalThis.location.reload()}>
+            重试
+          </button>
+        ) : null}
+      </div>
+    );
+  }
+  return <AppShell key={auth.user.id} auth={auth} onAuthChange={setAuth} />;
+}
+
+function AppShell({ auth, onAuthChange }: { auth: AuthState; onAuthChange: (value: AuthState) => void }) {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const location = useLocation();
+  const navigate = useNavigate();
   const title = getPageTitle(location.pathname);
+  const displayName = auth.user.display_name || (auth.authenticated ? auth.user.email : "临时用户");
+  const avatar = String(displayName || "U").trim().slice(0, 1).toUpperCase();
 
   return (
     <div className={collapsed ? "app-shell app-shell-collapsed" : "app-shell"}>
@@ -361,11 +385,11 @@ function AppShell() {
             <button className="icon-button" type="button" aria-label="通知">
               <Bell size={18} />
             </button>
-            <div className="profile-menu">
-              <span className="avatar">L</span>
-              <span className="profile-name">Lin</span>
+            <button className="profile-menu" type="button" onClick={() => navigate("/account")}>
+              <span className="avatar">{avatar}</span>
+              <span className="profile-name">{displayName}</span>
               <ChevronDown size={15} />
-            </div>
+            </button>
           </div>
         </header>
         <main className="page-container">
@@ -377,6 +401,7 @@ function AppShell() {
             <Route path="/questions" element={<QuestionBankPage />} />
             <Route path="/reports" element={<ReportsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/account" element={<AccountPage auth={auth} onAuthChange={onAuthChange} />} />
             <Route path="*" element={<DashboardPage />} />
           </Routes>
         </main>
@@ -514,6 +539,38 @@ function CpuIcon() {
 
 function DashboardPage() {
   const navigate = useNavigate();
+  const [overview, setOverview] = useState<WorkspaceOverview | null>(null);
+  const [overviewError, setOverviewError] = useState("");
+  useEffect(() => {
+    getWorkspaceOverview()
+      .then(setOverview)
+      .catch((cause) => setOverviewError(cause instanceof Error ? cause.message : "准备度加载失败"));
+  }, []);
+  const readiness = overview?.readiness;
+  const score = readiness?.score ?? 0;
+  const dashboardSessions: DashboardSession[] = (overview?.recent_sessions || []).map((item) => {
+    const rawScore = Number(item.summary?.average_score ?? item.average_score);
+    return {
+      title: `${item.role || "未命名岗位"} · ${getModeLabel(item.mode || "technical")}`,
+      mode: getModeLabel(item.mode || "technical"),
+      score: Number.isFinite(rawScore) ? Math.round(rawScore * 20) : null,
+      date: formatDate(item.updated_at || item.created_at),
+      accent: item.mode === "algorithm" ? "purple" : item.mode === "case" ? "amber" : "blue",
+    };
+  });
+  const latestSession = dashboardSessions[0];
+  const personalizedSuggestions = readiness?.skill_gaps.length
+    ? readiness.skill_gaps.slice(0, 3).map((skill, index) => ({
+        title: skill,
+        detail: `目标 JD 需要该能力，建议加入下一轮${index === 0 ? "技术" : "专项"}训练。`,
+        progress: readiness.skill_coverage,
+        color: ["blue", "mint", "coral"][index],
+      }))
+    : [
+        { title: "完善目标 JD", detail: "保存岗位描述后生成技能缺口。", progress: readiness?.profile_completeness ?? 0, color: "blue" },
+        { title: "补充项目证据", detail: "写清个人贡献、数据结果和复盘。", progress: readiness?.training_score ?? 0, color: "mint" },
+        { title: "开始场景训练", detail: "完成回答后更新个性化准备度。", progress: Math.min(100, (overview?.counts.sessions ?? 0) * 20), color: "coral" },
+      ];
   return (
     <div className="dashboard-page">
       <section className="welcome-row">
@@ -532,25 +589,25 @@ function DashboardPage() {
           <div className="card-header">
             <div>
               <span className="eyebrow">岗位准备度</span>
-              <h3>后端开发工程师</h3>
+              <h3>{readiness?.role || "正在计算你的岗位准备度"}</h3>
             </div>
             <button className="text-button" type="button" onClick={() => navigate("/match")}>
               查看匹配 <ArrowRight size={15} />
             </button>
           </div>
           <div className="readiness-body">
-            <div className="score-ring">
-              <span>78</span>
+            <div className="score-ring" style={{ background: `conic-gradient(var(--blue) 0 ${score}%, #e8edf5 ${score}% 100%)` }}>
+              <span>{score}</span>
               <small>/100</small>
             </div>
             <div className="readiness-copy">
-              <strong>基础扎实，补齐表达证据</strong>
-              <p>系统设计和项目深度是当前最值得投入的两项能力。</p>
+              <strong>{readiness?.label || (overviewError ? "准备度暂不可用" : "正在读取个人工作区")}</strong>
+              <p>{readiness?.skill_gaps.length ? `优先补齐：${readiness.skill_gaps.slice(0, 3).join("、")}` : "完善个人背景和目标 JD 后，系统会生成个性化能力缺口。"}</p>
               <div className="progress-line">
-                <span style={{ width: "78%" }} />
+                <span style={{ width: `${score}%` }} />
               </div>
               <div className="progress-meta">
-                <span>较上周 +8</span>
+                <span>档案完整度 {readiness?.profile_completeness ?? 0}%</span>
                 <span>目标 85</span>
               </div>
             </div>
@@ -558,15 +615,15 @@ function DashboardPage() {
           <div className="skill-strip">
             <span>
               <i className="mini-dot mint" />
-              已掌握 <b>8</b>
+              已掌握 <b>{overview?.counts.skills ?? 0}</b>
             </span>
             <span>
               <i className="mini-dot coral" />
-              待加强 <b>3</b>
+              待加强 <b>{readiness?.skill_gaps.length ?? 0}</b>
             </span>
             <span>
               <i className="mini-dot blue" />
-              已完成训练 <b>12</b>
+              已完成训练 <b>{overview?.counts.sessions ?? 0}</b>
             </span>
           </div>
         </article>
@@ -574,17 +631,17 @@ function DashboardPage() {
           <div className="card-header">
             <div>
               <span className="eyebrow">继续上次训练</span>
-              <h3>系统设计 · 缓存一致性</h3>
+              <h3>{latestSession?.title || "还没有进行中的训练"}</h3>
             </div>
-            <span className="small-tag blue-tag">技术面</span>
+            <span className="small-tag blue-tag">{latestSession?.mode || "待开始"}</span>
           </div>
           <div className="session-detail">
             <div className="session-icon">
               <Database size={22} />
             </div>
             <div>
-              <strong>第 4 / 6 题</strong>
-              <span>预计还需 12 分钟 · 难度中高</span>
+              <strong>{latestSession ? `最近得分 ${latestSession.score ?? "—"}` : "从目标岗位开始"}</strong>
+              <span>{latestSession?.date || "完成一次训练后可从这里继续复盘"}</span>
             </div>
           </div>
           <button
@@ -622,9 +679,10 @@ function DashboardPage() {
             </button>
           </div>
           <div className="session-list">
-            {recentSessions.map((session) => (
+            {dashboardSessions.map((session) => (
               <SessionRow key={session.title} session={session} />
             ))}
+            {!dashboardSessions.length ? <div className="empty-list"><Clock3 size={20} /><p>当前账户暂无训练记录。</p></div> : null}
           </div>
         </div>
         <aside className="right-column">
@@ -636,27 +694,9 @@ function DashboardPage() {
             <CircleHelp size={17} className="muted-icon" />
           </div>
           <div className="recommendation-list">
-            <RecommendationItem
-              icon={<GitBranch size={18} />}
-              title="系统设计"
-              detail="把方案讲成约束、取舍和结果"
-              progress={62}
-              color="blue"
-            />
-            <RecommendationItem
-              icon={<MessageSquareText size={18} />}
-              title="项目表达"
-              detail="用数字证明你的个人贡献"
-              progress={48}
-              color="mint"
-            />
-            <RecommendationItem
-              icon={<TimerReset size={18} />}
-              title="压力追问"
-              detail="30 秒内先给结论，再补证据"
-              progress={35}
-              color="coral"
-            />
+            {personalizedSuggestions.map((item) => (
+              <RecommendationItem key={item.title} icon={<GitBranch size={18} />} {...item} />
+            ))}
           </div>
           <div className="source-note">
             <ShieldCheck size={16} />
@@ -717,7 +757,7 @@ function RecommendationItem({
   );
 }
 
-function SessionRow({ session }: { session: (typeof recentSessions)[number] }) {
+function SessionRow({ session }: { session: DashboardSession }) {
   return (
     <div className="session-row">
       <span className={`session-accent accent-${session.accent}`} />
@@ -731,8 +771,8 @@ function SessionRow({ session }: { session: (typeof recentSessions)[number] }) {
         </span>
       </div>
       <div className="session-score">
-        <strong>{session.score}</strong>
-        <span>分</span>
+        <strong>{session.score ?? "—"}</strong>
+        <span>{session.score === null ? "" : "分"}</span>
       </div>
       <ArrowRight size={16} className="muted-icon" />
     </div>
@@ -2416,6 +2456,7 @@ function getModeLabel(mode: ModeId) {
 }
 
 function LegacyReportsPage() {
+  const legacySessions: DashboardSession[] = [];
   return (
     <div className="reports-page">
       <section className="page-intro">
@@ -2536,7 +2577,7 @@ function LegacyReportsPage() {
             <span>得分</span>
             <span>变化</span>
           </div>
-          {recentSessions.map((session, index) => (
+          {legacySessions.map((session, index) => (
             <div className="report-table-row" key={session.title}>
               <span>
                 <i className={`table-dot dot-${session.accent}`} />
@@ -2823,6 +2864,106 @@ function SettingsPage() {
   );
 }
 
+function AccountPage({ auth, onAuthChange }: { auth: AuthState; onAuthChange: (value: AuthState) => void }) {
+  const navigate = useNavigate();
+  const [mode, setMode] = useState<"login" | "register">("register");
+  const [displayName, setDisplayName] = useState(auth.user.display_name === "临时用户" ? "" : auth.user.display_name);
+  const [email, setEmail] = useState(auth.user.email || "");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setNotice("");
+    try {
+      const next = mode === "register"
+        ? await registerAccount({ display_name: displayName.trim(), email: email.trim(), password })
+        : await loginAccount({ email: email.trim(), password });
+      onAuthChange(next);
+      navigate("/");
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : "认证服务暂不可用";
+      setNotice(
+        message === "email_already_registered" ? "该邮箱已经注册，请直接登录。"
+          : message === "email_or_password_invalid" ? "邮箱或密码不正确。"
+            : message === "email_invalid" ? "请输入有效的邮箱地址。"
+              : message,
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const logout = async () => {
+    setBusy(true);
+    setNotice("");
+    try {
+      await logoutAccount();
+      const guest = await createTemporaryUser();
+      onAuthChange(guest);
+      navigate("/");
+    } catch (cause) {
+      setNotice(cause instanceof Error ? cause.message : "退出失败，请重试。");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="account-page">
+      <section className="page-intro">
+        <div>
+          <span className="eyebrow">用户中心</span>
+          <h2>{auth.authenticated ? "管理你的独立账户。" : "保存并隔离你的求职工作区。"}</h2>
+          <p>个人背景、JD、收藏、训练会话、回答、准备度和报告都只属于当前账户。</p>
+        </div>
+      </section>
+      <section className="account-panel">
+        {auth.authenticated ? (
+          <div className="account-summary">
+            <span className="account-avatar"><UserRound size={28} /></span>
+            <div>
+              <span className="small-tag green-tag">正式账户</span>
+              <h3>{auth.user.display_name}</h3>
+              <p>{auth.user.email}</p>
+              <small>账户数据已由服务端身份校验隔离，客户端不能通过修改用户 ID 访问其他账户。</small>
+            </div>
+            <button className="secondary-button danger-button" type="button" disabled={busy} onClick={() => void logout()}>
+              <LogOut size={16} />退出登录
+            </button>
+          </div>
+        ) : (
+          <>
+            <div className="account-guest-note">
+              <ShieldCheck size={18} />
+              <div><strong>当前是临时工作区</strong><p>注册会直接升级当前临时用户，已经保存的档案、JD 和训练记录都会保留。</p></div>
+            </div>
+            <div className="auth-tabs">
+              <button className={mode === "register" ? "active" : ""} type="button" onClick={() => setMode("register")}>注册账户</button>
+              <button className={mode === "login" ? "active" : ""} type="button" onClick={() => setMode("login")}>已有账户登录</button>
+            </div>
+            <form className="auth-form" onSubmit={(event) => void submit(event)}>
+              {mode === "register" ? (
+                <label><span>显示名称</span><div className="auth-input"><UserRound size={17} /><input value={displayName} onChange={(event) => setDisplayName(event.target.value)} minLength={1} maxLength={80} required placeholder="例如：张三" /></div></label>
+              ) : null}
+              <label><span>邮箱</span><div className="auth-input"><Mail size={17} /><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required placeholder="name@example.com" /></div></label>
+              <label><span>密码</span><div className="auth-input"><LockKeyhole size={17} /><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "register" ? "new-password" : "current-password"} minLength={mode === "register" ? 8 : 1} maxLength={128} required placeholder={mode === "register" ? "至少 8 位" : "输入密码"} /></div></label>
+              {notice ? <div className="auth-error" role="alert"><AlertCircle size={16} />{notice}</div> : null}
+              <button className="primary-button full-button" type="submit" disabled={busy}>
+                {busy ? <Gauge className="spin" size={16} /> : <LogIn size={16} />}
+                {mode === "register" ? "注册并保留当前数据" : "登录独立工作区"}
+              </button>
+            </form>
+          </>
+        )}
+        {notice && auth.authenticated ? <div className="auth-error" role="alert"><AlertCircle size={16} />{notice}</div> : null}
+      </section>
+    </div>
+  );
+}
+
 function RouteRow({
   icon,
   title,
@@ -2869,6 +3010,7 @@ function getPageTitle(pathname: string) {
   if (pathname.startsWith("/materials")) return "求职资料";
   if (pathname.startsWith("/questions")) return "题库";
   if (pathname.startsWith("/reports")) return "训练报告";
+  if (pathname.startsWith("/account")) return "用户中心";
   return "系统设置";
 }
 

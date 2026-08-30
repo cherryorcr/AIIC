@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,8 @@ from fastapi.responses import StreamingResponse
 from app.config import settings
 from app.schemas.models import (
     AlgorithmRunRequest,
+    AccountLogin,
+    AccountRegister,
     AnswerRequest,
     DocumentConfirmRequest,
     KnowledgeItemCreate,
@@ -24,6 +27,13 @@ from app.schemas.models import (
     UserProfileUpdate,
 )
 from app.services.interview import InterviewService
+from app.services.auth import (
+    hash_password,
+    hash_session_token,
+    new_session_token,
+    normalize_email,
+    verify_password,
+)
 from app.services.documents import ALLOWED_EXTENSIONS, extract_document_text, parse_document
 from app.services.model_router import ModelRouter
 from app.services.prompts import SCENE_POLICIES
@@ -179,41 +189,159 @@ def public_question(question_id: str) -> dict[str, Any]:
     return {"item": item}
 
 
-def _resolve_user(request: Request, response: Response | None = None, explicit_user_id: str | None = None) -> str:
-    """Resolve a temporary user from header/cookie, creating it on first use."""
-    db.init()
-    user_id = (
-        explicit_user_id
-        or request.headers.get("X-User-Id")
-        or request.cookies.get("interview_user_id")
+AUTH_COOKIE = "techmatch_session"
+
+
+def _request_token(request: Request) -> str | None:
+    authorization = request.headers.get("Authorization", "")
+    if authorization.lower().startswith("bearer "):
+        return authorization[7:].strip() or None
+    return request.cookies.get(AUTH_COOKIE)
+
+
+def _set_auth_cookie(response: Response, token: str) -> None:
+    max_age = max(1, settings.auth_session_days) * 24 * 60 * 60
+    response.set_cookie(
+        AUTH_COOKIE,
+        token,
+        max_age=max_age,
+        httponly=True,
+        secure=settings.auth_cookie_secure,
+        samesite="lax",
+        path="/",
     )
-    user = db.create_temp_user(user_id)
-    resolved = str(user["id"])
-    if response is not None and not explicit_user_id and not request.headers.get("X-User-Id"):
-        response.set_cookie(
-            "interview_user_id",
-            resolved,
-            max_age=60 * 60 * 24 * 365,
-            httponly=True,
-            samesite="lax",
-        )
+    # Remove the old raw user-id cookie; it is not an authentication secret.
+    response.delete_cookie("interview_user_id", path="/")
+
+
+def _issue_auth_session(user_id: str, request: Request, response: Response) -> None:
+    token = new_session_token()
+    db.create_auth_session(
+        user_id,
+        hash_session_token(token),
+        lifetime_days=settings.auth_session_days,
+        user_agent=request.headers.get("user-agent", ""),
+        ip_address=request.client.host if request.client else "",
+    )
+    _set_auth_cookie(response, token)
+
+
+def _authenticated_user(request: Request) -> dict[str, Any] | None:
+    token = _request_token(request)
+    if not token:
+        return None
+    resolved = db.resolve_auth_session(hash_session_token(token))
+    return resolved["user"] if resolved else None
+
+
+def _resolve_user(request: Request, response: Response | None = None) -> str:
+    """Resolve a hashed server-side session, creating an isolated guest if absent."""
+    db.init()
+    user = _authenticated_user(request)
+    if user:
+        resolved = str(user["id"])
+    else:
+        user = db.create_temp_user()
+        resolved = str(user["id"])
+        if response is not None:
+            _issue_auth_session(resolved, request, response)
     if response is not None:
         response.headers["X-User-Id"] = resolved
     return resolved
 
 
+def _revoke_request_session(request: Request) -> None:
+    token = _request_token(request)
+    if token:
+        db.revoke_auth_session(hash_session_token(token))
+
+
+def _validate_email(email: str) -> str:
+    normalized = normalize_email(email)
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", normalized):
+        raise HTTPException(status_code=422, detail="email_invalid")
+    return normalized
+
+
+def _require_session_owner(session_id: str, request: Request, response: Response) -> dict[str, Any]:
+    uid = _resolve_user(request, response)
+    session = db.get_session(session_id)
+    if session is None or session.get("user_id") != uid:
+        # Use 404 so session identifiers cannot be enumerated across accounts.
+        raise HTTPException(status_code=404, detail="session_not_found")
+    return session
+
+
 @app.post("/api/v1/users/temporary")
-def create_temporary_user(request: TemporaryUserCreate, response: Response) -> dict[str, Any]:
-    user = db.create_temp_user(request.user_id, request.display_name)
-    response.set_cookie("interview_user_id", user["id"], max_age=60 * 60 * 24 * 365, httponly=True, samesite="lax")
+def create_temporary_user(payload: TemporaryUserCreate, request: Request, response: Response) -> dict[str, Any]:
+    # Client-provided user IDs are deliberately ignored: an ID is not proof of ownership.
+    _revoke_request_session(request)
+    user = db.create_temp_user(display_name=payload.display_name)
+    _issue_auth_session(str(user["id"]), request, response)
     response.headers["X-User-Id"] = str(user["id"])
     return {"user": user, "status": "ready"}
 
 
+@app.post("/api/v1/auth/register", status_code=201)
+def register_account(payload: AccountRegister, request: Request, response: Response) -> dict[str, Any]:
+    email = _validate_email(payload.email)
+    current = _authenticated_user(request)
+    if current and not current.get("is_temporary"):
+        raise HTTPException(status_code=409, detail="account_already_registered")
+    upgrade_user_id = str(current["id"]) if current and current.get("is_temporary") else None
+    try:
+        user = db.register_account(
+            email,
+            hash_password(payload.password),
+            payload.display_name.strip(),
+            upgrade_user_id=upgrade_user_id,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status = 409 if detail in {"email_already_registered", "account_already_registered"} else 400
+        raise HTTPException(status_code=status, detail=detail) from exc
+    except Exception as exc:
+        # Handle a concurrent unique-email insert without leaking database details.
+        if db.get_user_credentials(email):
+            raise HTTPException(status_code=409, detail="email_already_registered") from exc
+        raise
+    _revoke_request_session(request)
+    _issue_auth_session(str(user["id"]), request, response)
+    return {"user": user, "profile": db.get_user_profile(str(user["id"])), "status": "registered"}
+
+
+@app.post("/api/v1/auth/login")
+def login_account(payload: AccountLogin, request: Request, response: Response) -> dict[str, Any]:
+    email = _validate_email(payload.email)
+    credentials = db.get_user_credentials(email)
+    if not credentials or not verify_password(payload.password, credentials.get("password_hash")):
+        raise HTTPException(status_code=401, detail="email_or_password_invalid")
+    _revoke_request_session(request)
+    user = db.get_user(str(credentials["id"]))
+    if not user:
+        raise HTTPException(status_code=401, detail="email_or_password_invalid")
+    _issue_auth_session(str(user["id"]), request, response)
+    return {"user": user, "profile": db.get_user_profile(str(user["id"])), "status": "authenticated"}
+
+
+@app.post("/api/v1/auth/logout")
+def logout_account(request: Request, response: Response) -> dict[str, Any]:
+    _revoke_request_session(request)
+    response.delete_cookie(AUTH_COOKIE, path="/")
+    response.delete_cookie("interview_user_id", path="/")
+    return {"status": "logged_out"}
+
+
 @app.get("/api/v1/users/me")
+@app.get("/api/v1/auth/me")
 def current_user(request: Request, response: Response) -> dict[str, Any]:
     uid = _resolve_user(request, response)
-    return {"user": db.get_user(uid), "profile": db.get_user_profile(uid)}
+    user = db.get_user(uid)
+    return {
+        "user": user,
+        "profile": db.get_user_profile(uid),
+        "authenticated": bool(user and not user.get("is_temporary")),
+    }
 
 
 @app.get("/api/v1/profile")
@@ -384,7 +512,7 @@ def create_user_job(job: JobCreate, request: Request, response: Response) -> dic
 def get_user_job(job_id: str, request: Request, response: Response) -> dict[str, Any]:
     uid = _resolve_user(request, response)
     job = db.get_job(job_id)
-    if job is None or job.get("user_id") not in {None, uid}:
+    if job is None or job.get("user_id") != uid:
         raise HTTPException(status_code=404, detail="job_not_found")
     return {"job": job}
 
@@ -430,16 +558,90 @@ def list_user_reports(request: Request, response: Response, limit: int = 100) ->
 def get_user_report(report_id: str, request: Request, response: Response) -> dict[str, Any]:
     uid = _resolve_user(request, response)
     report = db.get_report(report_id)
-    if report is None or report.get("user_id") not in {None, uid}:
+    if report is None or report.get("user_id") != uid:
         raise HTTPException(status_code=404, detail="report_not_found")
     return {"report": report}
 
 
 @app.post("/api/v1/reports")
 def create_user_report(report: ReportCreate, request: Request, response: Response) -> dict[str, Any]:
-    uid = _resolve_user(request, response, report.user_id)
+    uid = _resolve_user(request, response)
+    if report.session_id:
+        _require_session_owner(report.session_id, request, response)
     saved = db.save_report(uid, report.session_id, {"title": report.title, **report.payload})
     return {"report": saved, "status": "saved"}
+
+
+@app.get("/api/v1/workspace/overview")
+def workspace_overview(request: Request, response: Response) -> dict[str, Any]:
+    """Return a readiness snapshot derived only from the current user's data."""
+    uid = _resolve_user(request, response)
+    profile = db.get_user_profile(uid) or {"skills": [], "projects": [], "constraints": []}
+    jobs = db.list_jobs(uid, limit=100)
+    history = db.list_training_history(uid, limit=100)
+    reports = db.list_reports(uid, limit=100)
+    latest_job = jobs[0] if jobs else None
+
+    raw_profile_skills = {
+        str(value).strip().lower() for value in profile.get("skills", []) if str(value).strip()
+    }
+    profile_skills = raw_profile_skills | set(extract_skills(" ".join(raw_profile_skills)))
+    required_values = (latest_job or {}).get("skills") or extract_skills(
+        str((latest_job or {}).get("jd_text") or "")
+    )
+    raw_required_skills = {
+        str(value).strip().lower() for value in required_values if str(value).strip()
+    }
+    required_skills = raw_required_skills | set(
+        extract_skills(" ".join([*raw_required_skills, str((latest_job or {}).get("jd_text") or "")]))
+    )
+    matched_skills = sorted(profile_skills & required_skills)
+    skill_gaps = sorted(required_skills - profile_skills)
+    skill_coverage = (
+        len(matched_skills) / len(required_skills)
+        if required_skills
+        else min(1.0, len(profile_skills) / 5)
+    )
+
+    completeness_fields = (
+        profile.get("full_name"), profile.get("headline"), profile.get("summary"),
+        profile.get("education"), profile.get("experience"), profile.get("projects"), profile.get("skills"),
+    )
+    profile_completeness = sum(bool(value) for value in completeness_fields) / len(completeness_fields)
+    score_values = [
+        float(item["average_score"])
+        for item in history
+        if isinstance(item.get("average_score"), (int, float))
+    ]
+    training_score = min(1.0, (sum(score_values) / len(score_values)) / 5) if score_values else min(1.0, len(history) / 5)
+    readiness = round(100 * (0.45 * skill_coverage + 0.30 * profile_completeness + 0.25 * training_score))
+    if readiness >= 80:
+        readiness_label = "准备充分，继续强化高频场景"
+    elif readiness >= 55:
+        readiness_label = "基础已具备，优先补齐能力缺口"
+    else:
+        readiness_label = "先完善背景与目标岗位，再开始针对性训练"
+    return {
+        "user_id": uid,
+        "readiness": {
+            "score": readiness,
+            "label": readiness_label,
+            "role": str((latest_job or {}).get("role") or (latest_job or {}).get("title") or profile.get("headline") or "尚未设置目标岗位"),
+            "profile_completeness": round(profile_completeness * 100),
+            "skill_coverage": round(skill_coverage * 100),
+            "training_score": round(training_score * 100),
+            "matched_skills": matched_skills,
+            "skill_gaps": skill_gaps,
+        },
+        "counts": {
+            "skills": len(profile_skills),
+            "jobs": len(jobs),
+            "sessions": len(history),
+            "reports": len(reports),
+        },
+        "latest_job": latest_job,
+        "recent_sessions": history[:5],
+    }
 
 
 def _require_admin(token: str | None) -> None:
@@ -569,10 +771,14 @@ def delete_knowledge_item(
 async def start_session(request: SessionCreate, http_request: Request, response: Response) -> dict[str, Any]:
     try:
         payload = request.model_dump()
-        payload["user_id"] = _resolve_user(http_request, response, payload.get("user_id"))
+        payload["user_id"] = _resolve_user(http_request, response)
+        stored_profile = db.get_user_profile(payload["user_id"]) or {}
+        submitted_profile = payload.get("user_profile") or {}
+        if not any(submitted_profile.get(key) for key in ("skills", "projects", "education", "experience")):
+            payload["user_profile"] = stored_profile
         if payload.get("job_id"):
             job = db.get_job(str(payload["job_id"]))
-            if job is None or job.get("user_id") not in {None, payload["user_id"]}:
+            if job is None or job.get("user_id") != payload["user_id"]:
                 raise HTTPException(status_code=404, detail="job_not_found")
             if not payload.get("job_text"):
                 payload["job_text"] = str(job.get("jd_text") or job.get("job_text") or "")
@@ -584,29 +790,42 @@ async def start_session(request: SessionCreate, http_request: Request, response:
 
 
 @app.post("/api/v1/sessions/{session_id}/match")
-def match_session(session_id: str, request: MatchRequest) -> dict[str, Any]:
+def match_session(
+    session_id: str, payload: MatchRequest, request: Request, response: Response
+) -> dict[str, Any]:
+    _require_session_owner(session_id, request, response)
     try:
-        return interviews.match(session_id, request.filters)
+        return interviews.match(session_id, payload.filters)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="session_not_found") from exc
 
 
 @app.post("/api/interview/answer")
-async def answer_legacy(request: AnswerRequest, session_id: str | None = None) -> dict[str, Any]:
-    session_id = session_id or request.session_id
+async def answer_legacy(
+    payload: AnswerRequest,
+    request: Request,
+    response: Response,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    session_id = session_id or payload.session_id
     if not session_id:
         raise HTTPException(status_code=422, detail="session_id query parameter is required")
-    return await _answer(session_id, request)
+    return await _answer(session_id, payload, request, response)
 
 
 @app.post("/api/v1/sessions/{session_id}/turns")
-async def answer_turn(session_id: str, request: AnswerRequest) -> dict[str, Any]:
-    return await _answer(session_id, request)
+async def answer_turn(
+    session_id: str, payload: AnswerRequest, request: Request, response: Response
+) -> dict[str, Any]:
+    return await _answer(session_id, payload, request, response)
 
 
-async def _answer(session_id: str, request: AnswerRequest) -> dict[str, Any]:
+async def _answer(
+    session_id: str, payload: AnswerRequest, request: Request, response: Response
+) -> dict[str, Any]:
+    _require_session_owner(session_id, request, response)
     try:
-        return await interviews.answer(session_id, request.model_dump())
+        return await interviews.answer(session_id, payload.model_dump())
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="session_not_found") from exc
     except ValueError as exc:
@@ -614,22 +833,23 @@ async def _answer(session_id: str, request: AnswerRequest) -> dict[str, Any]:
 
 
 @app.post("/api/v1/sessions/{session_id}/algorithm/run")
-def run_algorithm(session_id: str, request: AlgorithmRunRequest) -> dict[str, Any]:
-    session = db.get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="session_not_found")
+def run_algorithm(
+    session_id: str, payload: AlgorithmRunRequest, request: Request, response: Response
+) -> dict[str, Any]:
+    session = _require_session_owner(session_id, request, response)
     if session.get("mode") != "algorithm":
         raise HTTPException(status_code=400, detail="session_mode_must_be_algorithm")
     current_question = session.get("current_question") or {}
-    if request.question_id != current_question.get("question_id"):
+    if payload.question_id != current_question.get("question_id"):
         raise HTTPException(status_code=400, detail="question_id_not_current")
-    tests = request.tests or current_question.get("tests") or []
-    result = sandbox.run(request.code, tests)
-    return {"session_id": session_id, "question_id": request.question_id, **result}
+    tests = payload.tests or current_question.get("tests") or []
+    result = sandbox.run(payload.code, tests)
+    return {"session_id": session_id, "question_id": payload.question_id, **result}
 
 
 @app.get("/api/v1/sessions/{session_id}")
-def get_session(session_id: str) -> dict[str, Any]:
+def get_session(session_id: str, request: Request, response: Response) -> dict[str, Any]:
+    _require_session_owner(session_id, request, response)
     try:
         return interviews.summary(session_id)
     except KeyError as exc:
@@ -637,12 +857,13 @@ def get_session(session_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/v1/sessions/{session_id}/summary")
-def get_summary(session_id: str) -> dict[str, Any]:
-    return get_session(session_id)
+def get_summary(session_id: str, request: Request, response: Response) -> dict[str, Any]:
+    return get_session(session_id, request, response)
 
 
 @app.post("/api/v1/sessions/{session_id}/complete")
-def complete_session(session_id: str) -> dict[str, Any]:
+def complete_session(session_id: str, request: Request, response: Response) -> dict[str, Any]:
+    _require_session_owner(session_id, request, response)
     try:
         return interviews.complete(session_id)
     except KeyError as exc:
@@ -650,9 +871,8 @@ def complete_session(session_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/v1/sessions/{session_id}/events")
-def session_events(session_id: str) -> StreamingResponse:
-    if not db.get_session(session_id):
-        raise HTTPException(status_code=404, detail="session_not_found")
+def session_events(session_id: str, request: Request, response: Response) -> StreamingResponse:
+    _require_session_owner(session_id, request, response)
 
     def stream():
         payload = {"type": "session_status", "session_id": session_id, "status": "ready"}

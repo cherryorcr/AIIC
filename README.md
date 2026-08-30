@@ -11,6 +11,7 @@ AIIC（AI Interview Coach）是一个面向求职者的场景化 AI 面试陪练
 - Python 算法题挑战版沙箱
 - SQLite 驱动的轻量 GraphRAG；默认加载 31 条带 MIT 来源元数据的公开题库转写
 - React + TypeScript + Vite 前端训练工作台
+- 临时用户和正式邮箱账户；注册可保留临时数据，个人背景、JD、会话、准备度和报告按账户隔离
 - CPU 业务服务器和 GPU 模型服务器的 Docker Compose 示例
 
 `data/approved-dataset.json` 是当前活动题库：行为面题来自 MIT 许可的 Tech Interview Handbook 公开汇总，算法/系统设计题为基于其题名和主题的自行转写。它们不是公司官方题库或频次统计；LeetCode 原题正文和答案没有复制。`data/mock-interview-dataset.json` 与问卷样例仍明确标记为 `synthetic_mock`，仅用于历史审计和开发演示。所有外部数据必须记录来源 URL、许可证、访问时间、版本和脱敏状态。
@@ -65,3 +66,4 @@ docs/      API 契约、研究计划和数据库设计
 - 当前模型未绑定时会使用确定性规则降级；生产环境需要接入模型网关并配置超时、重试和成本记录。
 - 当前算法沙箱是挑战版实现，正式开放前必须迁移到独立 runner，并启用禁网、资源限制和更强隔离。
 - 当前默认使用 SQLite；多实例部署应迁移到 PostgreSQL，并配置备份和恢复演练。
+- 当前实现为邮箱密码认证，不包含邮件验证、找回密码或第三方 OAuth；公网正式运营前应补充这些账户生命周期能力与限流。

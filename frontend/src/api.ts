@@ -35,6 +35,39 @@ export type UserProfile = {
   job_text?: string;
 };
 
+export type UserAccount = {
+  id: string;
+  display_name: string;
+  email?: string | null;
+  is_temporary: boolean;
+  created_at?: string;
+  last_seen_at?: string;
+};
+
+export type AuthState = {
+  user: UserAccount;
+  profile?: UserProfile | null;
+  authenticated: boolean;
+  status?: string;
+};
+
+export type WorkspaceOverview = {
+  user_id: string;
+  readiness: {
+    score: number;
+    label: string;
+    role: string;
+    profile_completeness: number;
+    skill_coverage: number;
+    training_score: number;
+    matched_skills: string[];
+    skill_gaps: string[];
+  };
+  counts: { skills: number; jobs: number; sessions: number; reports: number };
+  latest_job?: JobRecord | null;
+  recent_sessions: SessionSummary[];
+};
+
 export type MatchResponse = {
   session_id?: string;
   matched_skills: string[];
@@ -334,6 +367,64 @@ export function healthCheck() {
   }>("/api/v1/health");
 }
 
+export async function getCurrentUser(): Promise<AuthState> {
+  const result = await request<AuthState>("/api/v1/auth/me", undefined, { retries: 1 });
+  setActiveUser(result.user.id);
+  if (result.profile) writeStorage(PROFILE_KEY, result.profile);
+  return { ...result, authenticated: !result.user.is_temporary };
+}
+
+export async function registerAccount(input: {
+  display_name: string;
+  email: string;
+  password: string;
+}): Promise<AuthState> {
+  const result = await request<AuthState>(
+    "/api/v1/auth/register",
+    { method: "POST", body: JSON.stringify(input) },
+    { retries: 0 },
+  );
+  setActiveUser(result.user.id);
+  if (result.profile) writeStorage(PROFILE_KEY, result.profile);
+  return { ...result, authenticated: true };
+}
+
+export async function loginAccount(input: {
+  email: string;
+  password: string;
+}): Promise<AuthState> {
+  const result = await request<AuthState>(
+    "/api/v1/auth/login",
+    { method: "POST", body: JSON.stringify(input) },
+    { retries: 0 },
+  );
+  setActiveUser(result.user.id);
+  if (result.profile) writeStorage(PROFILE_KEY, result.profile);
+  return { ...result, authenticated: true };
+}
+
+export async function logoutAccount() {
+  return request<{ status: string }>(
+    "/api/v1/auth/logout",
+    { method: "POST", body: JSON.stringify({}) },
+    { retries: 0 },
+  );
+}
+
+export async function createTemporaryUser(displayName = "临时用户"): Promise<AuthState> {
+  const result = await request<{ user: UserAccount; profile?: UserProfile | null; status?: string }>(
+    "/api/v1/users/temporary",
+    { method: "POST", body: JSON.stringify({ display_name: displayName }) },
+    { retries: 0 },
+  );
+  setActiveUser(result.user.id);
+  return { ...result, authenticated: false };
+}
+
+export function getWorkspaceOverview() {
+  return request<WorkspaceOverview>("/api/v1/workspace/overview", undefined, { retries: 1 });
+}
+
 /** Call the persisted GraphRAG matcher for an existing session. */
 export function matchSession(sessionId: string, filters: Record<string, unknown> = {}) {
   return request<MatchResponse>(
@@ -447,10 +538,34 @@ const PROFILE_KEY = "techmatch:user-profile";
 const SESSIONS_KEY = "techmatch:session-ids";
 const FAVORITES_KEY = "techmatch:favorites";
 const QUEUE_KEY = "techmatch:training-queue";
+const ACTIVE_USER_KEY = "techmatch:active-user-id";
+const SCOPED_KEYS = [PROFILE_KEY, SESSIONS_KEY, FAVORITES_KEY, QUEUE_KEY];
+
+function scopedStorageKey(key: string) {
+  if (!SCOPED_KEYS.includes(key)) return key;
+  const userId = globalThis.localStorage?.getItem(ACTIVE_USER_KEY) || "unresolved";
+  return `${key}:${userId}`;
+}
+
+export function setActiveUser(userId: string) {
+  try {
+    for (const key of SCOPED_KEYS) {
+      const target = `${key}:${userId}`;
+      const legacy = globalThis.localStorage?.getItem(key);
+      if (legacy !== null && globalThis.localStorage?.getItem(target) === null) {
+        globalThis.localStorage?.setItem(target, legacy);
+      }
+      globalThis.localStorage?.removeItem(key);
+    }
+    globalThis.localStorage?.setItem(ACTIVE_USER_KEY, userId);
+  } catch {
+    /* private mode */
+  }
+}
 
 function readStorage<T>(key: string, fallback: T): T {
   try {
-    const value = globalThis.localStorage?.getItem(key);
+    const value = globalThis.localStorage?.getItem(scopedStorageKey(key));
     return value ? (JSON.parse(value) as T) : fallback;
   } catch {
     return fallback;
@@ -458,7 +573,7 @@ function readStorage<T>(key: string, fallback: T): T {
 }
 function writeStorage<T>(key: string, value: T) {
   try {
-    globalThis.localStorage?.setItem(key, JSON.stringify(value));
+    globalThis.localStorage?.setItem(scopedStorageKey(key), JSON.stringify(value));
   } catch {
     /* private mode */
   }
@@ -586,7 +701,7 @@ export function queueQuestion(question: BackendQuestion) {
 export function takeQueuedQuestion() {
   const question = readStorage<BackendQuestion | null>(QUEUE_KEY, null);
   try {
-    globalThis.localStorage?.removeItem(QUEUE_KEY);
+    globalThis.localStorage?.removeItem(scopedStorageKey(QUEUE_KEY));
   } catch {
     /* no-op */
   }

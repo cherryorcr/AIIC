@@ -55,6 +55,8 @@ class Settings:
 
     allowed_origins: str = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000")
     admin_token: str = os.getenv("ADMIN_TOKEN", "")
+    auth_session_days: int = int(os.getenv("AUTH_SESSION_DAYS", "30"))
+    auth_cookie_secure: bool = _bool("AUTH_COOKIE_SECURE", os.getenv("APP_ENV", "development") == "production")
     sandbox_timeout_seconds: float = float(os.getenv("SANDBOX_TIMEOUT_SECONDS", "3"))
     sandbox_max_output_bytes: int = int(os.getenv("SANDBOX_MAX_OUTPUT_BYTES", "20000"))
     sandbox_cpu_seconds: int = int(os.getenv("SANDBOX_CPU_SECONDS", "2"))

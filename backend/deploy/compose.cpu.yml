@@ -35,6 +35,9 @@ services:
       # Keep synthetic_mock data available in the repository, but never seed it
       # by accident in the deployed service.
       INTERVIEW_DATASET_PATH: /app/data/approved-dataset.json
+      # The current challenge endpoint is plain HTTP on :8080. Set this to
+      # true only after TLS is terminated for the public frontend hostname.
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
     volumes:
       - interview_data:/app/data
     ports:

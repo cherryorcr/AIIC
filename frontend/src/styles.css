@@ -83,7 +83,8 @@ button:focus-visible, a:focus-visible, textarea:focus-visible, input:focus-visib
 .topbar h1 { margin: 0; color: var(--ink); font-size: 20px; letter-spacing: -0.025em; }
 .topbar-actions { display: flex; align-items: center; gap: 13px; }
 .system-status, .compact-status { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; }
-.profile-menu { display: flex; align-items: center; gap: 8px; padding-left: 7px; color: var(--ink); font-size: 12px; }
+.profile-menu { display: flex; align-items: center; gap: 8px; padding: 3px 5px 3px 7px; border: 0; border-radius: 20px; color: var(--ink); background: transparent; font-size: 12px; }
+.profile-menu:hover { background: #f1f4f9; }
 .avatar { display: grid; place-items: center; width: 29px; height: 29px; border-radius: 50%; color: #fff; background: var(--navy-2); font-size: 12px; font-weight: 750; }
 .page-container { max-width: 1500px; margin: 0 auto; padding: 30px 34px 50px; }
 
@@ -212,3 +213,27 @@ button:focus-visible, a:focus-visible, textarea:focus-visible, input:focus-visib
 
 @media (max-width: 850px) { .materials-layout { grid-template-columns: 1fr; }.materials-library { min-height: 0; }.materials-file-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }.materials-empty { min-height: 70px; }.materials-form-heading h3 { max-width: 65vw; } }
 @media (max-width: 520px) { .upload-panel { align-items: flex-start; flex-direction: column; }.upload-button { width: 100%; }.materials-file-list { grid-template-columns: 1fr; }.materials-fields { grid-template-columns: 1fr; }.material-field:nth-child(n+3) { grid-column: auto; }.materials-form-actions { align-items: stretch; flex-direction: column-reverse; }.materials-form-actions .primary-button { width: 100%; }.materials-intro .secondary-button { width: 100%; } }
+
+.auth-loading { display: grid; place-items: center; align-content: center; gap: 13px; min-height: 100vh; color: var(--blue); background: radial-gradient(circle at top, #f8faff, #e9eef6); }
+.auth-loading strong { color: var(--ink); font-size: 13px; }
+.account-page { max-width: 880px; margin: 0 auto; }
+.account-panel { padding: 25px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); }
+.account-summary { display: grid; grid-template-columns: 58px minmax(0, 1fr) auto; align-items: center; gap: 17px; }
+.account-avatar { display: grid; place-items: center; width: 58px; height: 58px; border-radius: 17px; color: var(--blue); background: var(--blue-soft); }
+.account-summary h3 { margin: 9px 0 3px; font-size: 20px; }
+.account-summary p { margin: 0 0 7px; color: var(--muted); font-size: 12px; }
+.account-summary small { display: block; max-width: 520px; color: #909bad; font-size: 10px; line-height: 1.5; }
+.danger-button { color: #c75f45; }
+.account-guest-note { display: flex; align-items: flex-start; gap: 10px; padding: 14px; border: 1px solid #d9e4fb; border-radius: 10px; color: var(--blue); background: var(--blue-soft); }
+.account-guest-note strong { color: var(--ink); font-size: 12px; }
+.account-guest-note p { margin: 5px 0 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
+.auth-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin: 21px 0 18px; padding: 4px; border-radius: 9px; background: #f1f4f8; }
+.auth-tabs button { min-height: 36px; border: 0; border-radius: 7px; color: var(--muted); background: transparent; font-size: 11px; font-weight: 750; }
+.auth-tabs button.active { color: var(--blue); background: #fff; box-shadow: 0 2px 7px rgba(24, 36, 59, 0.08); }
+.auth-form { display: grid; gap: 14px; max-width: 520px; margin: 0 auto; }
+.auth-form label { display: grid; gap: 6px; color: var(--ink); font-size: 10px; font-weight: 750; }
+.auth-input { display: flex; align-items: center; gap: 9px; min-height: 42px; padding: 0 11px; border: 1px solid var(--line-strong); border-radius: 9px; color: #929eb0; background: #fbfcfe; }
+.auth-input:focus-within { border-color: #9fb8fb; box-shadow: 0 0 0 3px rgba(55, 108, 246, 0.09); }
+.auth-input input { width: 100%; border: 0; outline: 0; color: var(--ink); background: transparent; font-size: 12px; }
+.auth-error { display: flex; align-items: center; gap: 7px; padding: 10px 11px; border: 1px solid #f0cfc5; border-radius: 8px; color: #b5543c; background: var(--coral-soft); font-size: 10px; }
+@media (max-width: 620px) { .account-panel { padding: 18px; }.account-summary { grid-template-columns: 48px minmax(0, 1fr); }.account-avatar { width: 48px; height: 48px; }.account-summary .danger-button { grid-column: span 2; width: 100%; } }
