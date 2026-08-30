@@ -12,6 +12,7 @@ export type BackendQuestion = {
   skills?: string[];
   difficulty?: string;
   source_refs?: string[];
+  source_confidence?: string;
   tests?: Array<{
     args?: unknown[];
     kwargs?: Record<string, unknown>;
@@ -26,14 +27,19 @@ export type UserProfile = {
   projects: string[];
   education?: string;
   experience?: string;
+  full_name?: string;
+  headline?: string;
+  summary?: string;
+  achievements?: string[];
   constraints?: string[];
   job_text?: string;
 };
 
 export type MatchResponse = {
-  session_id: string;
+  session_id?: string;
   matched_skills: string[];
   questions: BackendQuestion[];
+  match_score?: number;
   [key: string]: unknown;
 };
 
@@ -79,6 +85,30 @@ export type JobRecord = {
   created_at?: string;
   updated_at?: string;
   [key: string]: unknown;
+};
+
+export type DocumentKind = "resume" | "job_description";
+
+export type CandidateDocument = {
+  id?: string;
+  document_id?: string;
+  user_id?: string;
+  kind: DocumentKind;
+  filename: string;
+  content_type?: string;
+  extracted_text?: string;
+  parsed_json?: Record<string, unknown>;
+  parsed?: Record<string, unknown>;
+  status?: "uploaded" | "parsed" | "confirmed" | "failed" | string;
+  provider?: string;
+  warnings?: string[];
+  created_at?: string;
+  updated_at?: string;
+  [key: string]: unknown;
+};
+
+export type DocumentParseResponse = CandidateDocument & {
+  document?: CandidateDocument;
 };
 
 export type ReportRecord = {
@@ -151,14 +181,14 @@ async function request<T>(
     const controller = new AbortController();
     const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
     try {
+      const isMultipart = typeof FormData !== "undefined" && init?.body instanceof FormData;
       const response = await fetch(path, {
         ...init,
         credentials: "include",
         signal: controller.signal,
-        headers: {
-          "Content-Type": "application/json",
-          ...(init?.headers ?? {}),
-        },
+        headers: isMultipart
+          ? { ...(init?.headers ?? {}) }
+          : { "Content-Type": "application/json", ...(init?.headers ?? {}) },
       });
       const raw = await response.text();
       let payload: unknown = null;
@@ -223,11 +253,30 @@ export function startSession(input: {
   return request<StartSessionResponse>(
     "/api/v1/sessions",
     { method: "POST", body: JSON.stringify(input) },
-    { timeoutMs: 20000, retries: 2 },
+    // Session creation may generate the first question with the strong model.
+    // It is a POST, so replaying it after a client timeout can create orphan
+    // sessions; wait for one bounded request instead of retrying blindly.
+    { timeoutMs: 120000, retries: 0 },
   ).then((result) => {
     rememberSession(result.session_id);
     return result;
   });
+}
+
+/** Preview a job match without creating a persisted interview session. */
+export function previewMatch(input: {
+  mode: ModeId;
+  role: string;
+  job_text: string;
+  user_profile: { skills: string[]; projects: string[] };
+  difficulty?: "easy" | "medium" | "hard";
+  job_id?: string;
+}) {
+  return request<MatchResponse>(
+    "/api/v1/matches",
+    { method: "POST", body: JSON.stringify(input) },
+    { timeoutMs: 20000, retries: 1 },
+  );
 }
 
 export function submitTurn(
@@ -247,6 +296,14 @@ export function submitTurn(
   return request<TurnResponse>(`/api/v1/sessions/${encodeURIComponent(sessionId)}/turns`, {
     method: "POST",
     body: JSON.stringify(input),
+  }, {
+    // Evaluation may call the remote strong model and then the GPU-hosted
+    // fallback. Do not abort a valid in-flight answer after the generic
+    // 12-second request budget. Retries are intentionally disabled here:
+    // replaying a POST after a client timeout can race with the first request
+    // and advance the interview to the next question twice.
+    timeoutMs: 120000,
+    retries: 0,
   });
 }
 
@@ -319,6 +376,51 @@ export async function listJobs(limit = 100): Promise<JobRecord[]> {
     `/api/v1/jobs?limit=${Math.max(1, Math.min(limit, 500))}`,
   );
   return result.jobs || [];
+}
+
+/** Upload a resume or job description for text extraction and strong-model parsing. */
+export async function uploadDocument(file: File, kind: DocumentKind) {
+  const body = new FormData();
+  body.append("file", file);
+  body.append("kind", kind);
+  const result = await request<DocumentParseResponse>(
+    "/api/v1/documents/parse",
+    { method: "POST", body },
+    { timeoutMs: 120000, retries: 0 },
+  );
+  return result.document || result;
+}
+
+export async function listDocuments(): Promise<CandidateDocument[]> {
+  const result = await request<{ documents?: CandidateDocument[]; items?: CandidateDocument[] }>(
+    "/api/v1/documents",
+  );
+  return result.documents || result.items || [];
+}
+
+export async function getDocument(documentId: string) {
+  const result = await request<{ document?: CandidateDocument } | CandidateDocument>(
+    `/api/v1/documents/${encodeURIComponent(documentId)}`,
+  );
+  return "document" in result && result.document ? result.document : result;
+}
+
+/** Persist the user-reviewed extraction into the canonical profile or job record. */
+export async function confirmDocument(documentId: string, payload: Record<string, unknown>) {
+  const result = await request<DocumentParseResponse>(
+    `/api/v1/documents/${encodeURIComponent(documentId)}/confirm`,
+    { method: "POST", body: JSON.stringify(payload) },
+    { timeoutMs: 30000, retries: 0 },
+  );
+  return result.document || result;
+}
+
+export async function deleteDocument(documentId: string) {
+  return request<{ status?: string }>(
+    `/api/v1/documents/${encodeURIComponent(documentId)}`,
+    { method: "DELETE" },
+    { retries: 0 },
+  );
 }
 
 export async function listFavorites(
@@ -409,10 +511,14 @@ export async function saveUserProfile(profile: UserProfile) {
       {
         method: "PUT",
         body: JSON.stringify({
+          full_name: profile.full_name,
+          headline: profile.headline,
+          summary: profile.summary,
           skills: profile.skills,
           projects: profile.projects,
           education: profile.education,
           experience: profile.experience,
+          achievements: profile.achievements,
           constraints: profile.constraints,
         }),
       },

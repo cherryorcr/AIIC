@@ -21,17 +21,23 @@ import {
   loadFavorites,
   loadUserProfile,
   completeSession,
-  matchSession,
+  confirmDocument,
+  deleteDocument,
+  listDocuments,
+  previewMatch,
   queueQuestion,
   runAlgorithm,
   saveUserProfile,
   startSession,
   submitTurn,
   toggleFavorite,
+  uploadDocument,
 } from "./api";
 import type {
   AlgorithmResult,
   BackendQuestion,
+  CandidateDocument,
+  DocumentKind,
   Feedback as BackendFeedback,
   MatchResponse,
   SessionSummary,
@@ -53,7 +59,10 @@ import {
   Clock3,
   Code2,
   Database,
+  FileCheck2,
   FileQuestion,
+  FileText,
+  FolderOpen,
   Gauge,
   GitBranch,
   LayoutDashboard,
@@ -74,6 +83,8 @@ import {
   Sparkles,
   Target,
   TimerReset,
+  Trash2,
+  UploadCloud,
   X,
 } from "lucide-react";
 
@@ -99,6 +110,8 @@ type Question = {
   source: string;
   sourceUrl?: string;
   sourceLicense?: string;
+  sourceConfidence?: string;
+  sourceVersion?: string;
   followUp: string;
   rubric: string[];
   tests?: Array<{
@@ -275,6 +288,7 @@ const navItems: Array<{
   { label: "总览", path: "/", Icon: LayoutDashboard, end: true },
   { label: "开始训练", path: "/practice", Icon: Sparkles },
   { label: "岗位匹配", path: "/match", Icon: Target },
+  { label: "求职资料", path: "/materials", Icon: FolderOpen },
   { label: "题库", path: "/questions", Icon: FileQuestion },
   { label: "训练报告", path: "/reports", Icon: BarChart3 },
 ];
@@ -359,6 +373,7 @@ function AppShell() {
             <Route path="/" element={<DashboardPage />} />
             <Route path="/practice" element={<PracticePage />} />
             <Route path="/match" element={<MatchPage />} />
+            <Route path="/materials" element={<MaterialsPage />} />
             <Route path="/questions" element={<QuestionBankPage />} />
             <Route path="/reports" element={<ReportsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
@@ -742,6 +757,8 @@ function backendQuestionToQuestion(
       : fallback?.source || "synthetic_mock",
     sourceUrl: typeof item.source?.url === "string" ? item.source.url : fallback?.sourceUrl,
     sourceLicense: typeof item.source?.license === "string" ? item.source.license : fallback?.sourceLicense,
+    sourceConfidence: item.source_confidence || fallback?.sourceConfidence,
+    sourceVersion: typeof item.source?.version === "string" ? item.source.version : fallback?.sourceVersion,
     followUp: item.follow_ups?.join(" ") || fallback?.followUp || "请补充一个具体事实或结果。",
     rubric: item.rubric?.length ? item.rubric : fallback?.rubric || [],
     tests: item.tests || fallback?.tests,
@@ -769,7 +786,9 @@ function modeFromProcessType(value?: string): ModeId {
 function questionFromKnowledge(item: BackendQuestion): Question {
   const mode = modeFromProcessType(item.process_type);
   const fallback =
-    questions.find((candidate) => candidate.id === (item.id || item.question_id)) ||
+    questions.find(
+      (candidate) => candidate.id === (item.id || item.question_id) && candidate.mode === mode,
+    ) ||
     questions.find((candidate) => candidate.mode === mode);
   return backendQuestionToQuestion(
     {
@@ -831,6 +850,7 @@ function PracticePage() {
   );
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [completing, setCompleting] = useState(false);
   const [error, setError] = useState("");
   const [modelOnline, setModelOnline] = useState(true);
   const mode = modeMeta.find((item) => item.id === activeMode) ?? modeMeta[0];
@@ -908,9 +928,23 @@ function PracticePage() {
       setQuestionIndex(0);
     }
   }
+  async function finishSession() {
+    if (!sessionId || completing) return;
+    setCompleting(true);
+    setError("");
+    try {
+      await completeSession(sessionId);
+      setSessionCompleted(true);
+      setNextQuestionData(null);
+    } catch {
+      setError("结束训练失败，请稍后重试。");
+    } finally {
+      setCompleting(false);
+    }
+  }
   function nextQuestion(completeWhenDone = true) {
     if (completeWhenDone && !nextQuestionData && sessionId) {
-      void completeSession(sessionId).then(() => setSessionCompleted(true)).catch(() => setError("结束训练失败，请稍后重试。"));
+      void finishSession();
       return;
     }
     const fallback = questions.find((item) => item.mode === activeMode) || questions[0];
@@ -940,8 +974,31 @@ function PracticePage() {
           : null,
       );
       if (!result.next_question) setSessionCompleted(false);
-    } catch {
-      setError("提交失败，回答已保留在当前页面，请检查后端服务后重试。");
+    } catch (cause) {
+      // If the browser lost the response after the server committed the turn,
+      // reconcile from the persisted session before showing an error. This
+      // prevents a transient disconnect from making users submit the same
+      // answer again and hitting question_id_not_current.
+      try {
+        const persisted = await getSessionSummary(sessionId);
+        const persistedTurn = (persisted.turns || []).find(
+          (item) => String(item.question_id || "") === question.id && item.feedback,
+        );
+        if (persistedTurn?.feedback) {
+          setFeedback(persistedTurn.feedback as BackendFeedback);
+          setSubmitted(true);
+          const current = persisted.current_question as BackendQuestion | null | undefined;
+          setNextQuestionData(
+            current ? backendQuestionToQuestion(current, activeMode, question) : null,
+          );
+          setError("");
+          return;
+        }
+      } catch {
+        // Preserve the original error below when reconciliation is unavailable.
+      }
+      const message = cause instanceof Error ? cause.message : "网络请求失败";
+      setError(`提交失败：${message}。回答已保留在当前页面，可稍后重试。`);
     } finally {
       setSubmitting(false);
     }
@@ -1084,6 +1141,8 @@ function PracticePage() {
               </a>
             ) : null}
             {question.sourceLicense ? <small>{question.sourceLicense}</small> : null}
+            {question.sourceConfidence ? <small>可信度：{question.sourceConfidence}</small> : null}
+            {question.sourceVersion ? <small>版本：{question.sourceVersion}</small> : null}
           </div>
           {activeMode !== "algorithm" ? (
             <>
@@ -1109,7 +1168,7 @@ function PracticePage() {
                 <button
                   className="primary-button"
                   type="button"
-                  disabled={answer.trim().length < 8 || !sessionId || submitting}
+                  disabled={answer.trim().length < 8 || !sessionId || submitting || submitted}
                   onClick={submitAnswer}
                 >
                   {submitting ? (
@@ -1133,9 +1192,20 @@ function PracticePage() {
                 <strong>判题约束</strong>
                 <span>时间 O(n) · 空间 O(n) · Python 3.11 · 后端固定测试</span>
               </div>
-              <button className="secondary-button" type="button" onClick={() => nextQuestion(false)}>
-                换一道题 <ArrowRight size={15} />
-              </button>
+              <div className="algorithm-actions">
+                <button className="secondary-button" type="button" onClick={() => nextQuestion(false)}>
+                  换一道题 <ArrowRight size={15} />
+                </button>
+                <button
+                  className="primary-button"
+                  type="button"
+                  onClick={() => void finishSession()}
+                  disabled={!sessionId || completing}
+                >
+                  {completing ? "保存报告中..." : "完成训练"}
+                  <CheckCircle2 size={15} />
+                </button>
+              </div>
             </div>
           ) : null}
         </div>
@@ -1399,6 +1469,327 @@ function ScoreBar({ label, score, color }: { label: string; score: number; color
   );
 }
 
+type MaterialDraft = {
+  full_name: string;
+  headline: string;
+  summary: string;
+  education: string;
+  experience: string;
+  skills: string;
+  projects: string;
+  achievements: string;
+  title: string;
+  company: string;
+  role: string;
+  location: string;
+  seniority: string;
+  responsibilities: string;
+  requirements: string;
+};
+
+const emptyMaterialDraft: MaterialDraft = {
+  full_name: "",
+  headline: "",
+  summary: "",
+  education: "",
+  experience: "",
+  skills: "",
+  projects: "",
+  achievements: "",
+  title: "",
+  company: "",
+  role: "",
+  location: "",
+  seniority: "",
+  responsibilities: "",
+  requirements: "",
+};
+
+function textValue(value: unknown) {
+  return typeof value === "string" ? value : value == null ? "" : String(value);
+}
+
+function listValue(value: unknown) {
+  if (Array.isArray(value)) return value.map((item) => textValue(item)).filter(Boolean).join("\n");
+  return textValue(value);
+}
+
+function documentId(document: CandidateDocument) {
+  return String(document.id || document.document_id || "");
+}
+
+function draftFromDocument(document: CandidateDocument | null, kind: DocumentKind): MaterialDraft {
+  if (!document) return { ...emptyMaterialDraft };
+  const parsed = (document.parsed_json || document.parsed || {}) as Record<string, unknown>;
+  const profile = (parsed.profile || parsed.resume || {}) as Record<string, unknown>;
+  const job = (parsed.job || parsed.job_description || {}) as Record<string, unknown>;
+  if (kind === "resume") {
+    return {
+      ...emptyMaterialDraft,
+      full_name: textValue(profile.full_name || profile.name || parsed.full_name),
+      headline: textValue(profile.headline || profile.target_role),
+      summary: textValue(profile.summary),
+      education: textValue(profile.education),
+      experience: textValue(profile.experience || profile.work_experience),
+      skills: listValue(profile.skills),
+      projects: listValue(profile.projects),
+      achievements: listValue(profile.achievements || profile.results),
+    };
+  }
+  return {
+    ...emptyMaterialDraft,
+    title: textValue(job.title || parsed.title),
+    company: textValue(job.company || parsed.company),
+    role: textValue(job.role),
+    location: textValue(job.location),
+    seniority: textValue(job.seniority || job.level),
+    summary: textValue(job.summary),
+    skills: listValue(job.skills),
+    responsibilities: listValue(job.responsibilities),
+    requirements: listValue(job.requirements),
+  };
+}
+
+function MaterialsPage() {
+  const navigate = useNavigate();
+  const [kind, setKind] = useState<DocumentKind>("resume");
+  const [documents, setDocuments] = useState<CandidateDocument[]>([]);
+  const [selectedId, setSelectedId] = useState("");
+  const [draft, setDraft] = useState<MaterialDraft>({ ...emptyMaterialDraft });
+  const [loading, setLoading] = useState(true);
+  const [uploading, setUploading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const selected = documents.find((item) => documentId(item) === selectedId) || null;
+  const visibleDocuments = documents.filter((item) => item.kind === kind);
+
+  useEffect(() => {
+    let cancelled = false;
+    void listDocuments()
+      .then((items) => {
+        if (cancelled) return;
+        setDocuments(items);
+        const first = items.find((item) => item.kind === kind) || items[0];
+        if (first) {
+          setSelectedId(documentId(first));
+          setKind(first.kind);
+          setDraft(draftFromDocument(first, first.kind));
+        }
+      })
+      .catch((cause) => {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : "资料服务暂不可用");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const next = documents.find((item) => documentId(item) === selectedId && item.kind === kind);
+    if (next) setDraft(draftFromDocument(next, kind));
+    else if (!visibleDocuments.length) setDraft({ ...emptyMaterialDraft });
+  }, [selectedId, kind, documents.length]);
+
+  function switchKind(nextKind: DocumentKind) {
+    setKind(nextKind);
+    setError("");
+    setNotice("");
+    const next = documents.find((item) => item.kind === nextKind);
+    setSelectedId(next ? documentId(next) : "");
+    setDraft(draftFromDocument(next || null, nextKind));
+  }
+
+  async function handleUpload(file: File) {
+    setUploading(true);
+    setError("");
+    setNotice("");
+    try {
+      const uploaded = await uploadDocument(file, kind);
+      const uploadedId = documentId(uploaded);
+      setDocuments((current) => [uploaded, ...current.filter((item) => documentId(item) !== uploadedId)]);
+      setSelectedId(uploadedId);
+      setDraft(draftFromDocument(uploaded, kind));
+      setNotice("文件已上传，AI 正在提取内容。请校对后再保存到档案。");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "文件上传失败，请稍后重试");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  function updateField(field: keyof MaterialDraft, value: string) {
+    setDraft((current) => ({ ...current, [field]: value }));
+  }
+
+  async function saveDraft() {
+    if (!selected) {
+      setError("请先上传一份文件");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      if (kind === "resume") {
+        const profile = {
+          ...loadUserProfile(),
+          full_name: draft.full_name.trim(),
+          headline: draft.headline.trim(),
+          summary: draft.summary.trim(),
+          education: draft.education.trim(),
+          experience: draft.experience.trim(),
+          skills: draft.skills.split(/[,，\n]/).map((item) => item.trim()).filter(Boolean),
+          projects: draft.projects.split(/\n+/).map((item) => item.trim()).filter(Boolean),
+          achievements: draft.achievements.split(/\n+/).map((item) => item.trim()).filter(Boolean),
+        };
+        await confirmDocument(documentId(selected), { parsed: { kind, profile } });
+        await saveUserProfile(profile);
+      } else {
+        const job = {
+          title: draft.title.trim(),
+          company: draft.company.trim(),
+          role: draft.role.trim(),
+          location: draft.location.trim(),
+          seniority: draft.seniority.trim(),
+          summary: draft.summary.trim(),
+          skills: draft.skills.split(/[,，\n]/).map((item) => item.trim()).filter(Boolean),
+          responsibilities: draft.responsibilities.split(/\n+/).map((item) => item.trim()).filter(Boolean),
+          requirements: draft.requirements.split(/\n+/).map((item) => item.trim()).filter(Boolean),
+        };
+        await confirmDocument(documentId(selected), { parsed: { kind, job } });
+      }
+      setDocuments((current) =>
+        current.map((item) => (documentId(item) === documentId(selected) ? { ...item, status: "confirmed" } : item)),
+      );
+      setNotice(kind === "resume" ? "简历已保存到个人档案。" : "JD 已保存，可前往岗位匹配查看结果。");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "保存失败，请稍后重试");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeSelected() {
+    if (!selected || !documentId(selected)) return;
+    if (!globalThis.confirm(`确定删除 ${selected.filename}？`)) return;
+    setError("");
+    try {
+      await deleteDocument(documentId(selected));
+      const remaining = documents.filter((item) => documentId(item) !== documentId(selected));
+      setDocuments(remaining);
+      const next = remaining.find((item) => item.kind === kind);
+      setSelectedId(next ? documentId(next) : "");
+      setDraft(draftFromDocument(next || null, kind));
+      setNotice("资料已删除。");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "删除失败，请稍后重试");
+    }
+  }
+
+  const fields: Array<{ key: keyof MaterialDraft; label: string; multiline?: boolean; hint?: string }> =
+    kind === "resume"
+      ? [
+          { key: "full_name", label: "姓名" },
+          { key: "headline", label: "求职方向" },
+          { key: "summary", label: "个人简介", multiline: true },
+          { key: "education", label: "教育背景", multiline: true },
+          { key: "experience", label: "工作 / 实习经历", multiline: true },
+          { key: "skills", label: "技能", multiline: true, hint: "用逗号或换行分隔" },
+          { key: "projects", label: "项目经历", multiline: true, hint: "每行一段经历" },
+          { key: "achievements", label: "关键成果", multiline: true, hint: "每行一项结果或指标" },
+        ]
+      : [
+          { key: "title", label: "岗位名称" },
+          { key: "company", label: "公司" },
+          { key: "role", label: "岗位方向" },
+          { key: "location", label: "工作地点" },
+          { key: "seniority", label: "职级" },
+          { key: "summary", label: "岗位简介", multiline: true },
+          { key: "skills", label: "核心技能", multiline: true, hint: "用逗号或换行分隔" },
+          { key: "responsibilities", label: "工作职责", multiline: true, hint: "每行一项职责" },
+          { key: "requirements", label: "任职要求", multiline: true, hint: "每行一项要求" },
+        ];
+
+  return (
+    <div className="materials-page">
+      <section className="page-intro materials-intro">
+        <div>
+          <span className="eyebrow">求职资料</span>
+          <h2>统一管理简历与目标岗位。</h2>
+          <p>上传文件后由强模型提取关键信息，你可以校对每个字段，再保存到个人档案和岗位库。</p>
+        </div>
+        <button className="secondary-button" type="button" onClick={() => navigate("/match")}>
+          <Target size={16} /> 查看岗位匹配
+        </button>
+      </section>
+      {error ? (
+        <div className="source-note materials-alert" role="alert">
+          <AlertCircle size={16} />
+          <div><strong>资料服务提示</strong><p>{error}</p></div>
+        </div>
+      ) : null}
+      {notice ? (
+        <div className="materials-notice" role="status"><CheckCircle2 size={16} /> {notice}</div>
+      ) : null}
+      <div className="materials-layout">
+        <aside className="materials-library panel">
+          <div className="panel-title-row">
+            <div><span className="eyebrow">资料库</span><h3>我的求职文件</h3></div>
+            <FileCheck2 size={17} className="muted-icon" />
+          </div>
+          <div className="material-tabs" role="tablist" aria-label="资料类型">
+            <button className={kind === "resume" ? "material-tab active" : "material-tab"} type="button" onClick={() => switchKind("resume")}>
+              <FileText size={15} /> 简历
+            </button>
+            <button className={kind === "job_description" ? "material-tab active" : "material-tab"} type="button" onClick={() => switchKind("job_description")}>
+              <BriefcaseBusiness size={15} /> JD
+            </button>
+          </div>
+          <div className="materials-file-list">
+            {loading ? <div className="materials-empty">正在加载资料…</div> : null}
+            {!loading && !visibleDocuments.length ? <div className="materials-empty">还没有{kind === "resume" ? "简历" : "JD"}<span>上传文件后会出现在这里</span></div> : null}
+            {visibleDocuments.map((item) => {
+              const id = documentId(item);
+              return (
+                <button key={id || item.filename} className={id === selectedId ? "material-file selected" : "material-file"} type="button" onClick={() => { setSelectedId(id); setDraft(draftFromDocument(item, kind)); }}>
+                  <span className="material-file-icon"><FileText size={16} /></span>
+                  <span className="material-file-copy"><strong>{item.filename}</strong><small>{item.status === "confirmed" ? "已确认" : item.status === "failed" ? "解析失败" : "待校对"}</small></span>
+                  <ArrowRight size={14} />
+                </button>
+              );
+            })}
+          </div>
+        </aside>
+        <section className="materials-editor">
+          <div className="upload-panel panel">
+            <div className="upload-copy"><span className="upload-icon"><UploadCloud size={20} /></span><div><strong>上传{kind === "resume" ? "简历" : "岗位 JD"}</strong><p>支持 PDF、DOCX、TXT、MD，单文件不超过 5 MB</p></div></div>
+            <label className="secondary-button upload-button">
+              {uploading ? <RotateCcw size={15} className="spin" /> : <Plus size={15} />}
+              {uploading ? "解析中…" : "选择文件"}
+              <input type="file" accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void handleUpload(file); }} disabled={uploading} />
+            </label>
+          </div>
+          <div className="materials-form-panel panel">
+            <div className="panel-title-row materials-form-heading">
+              <div><span className="eyebrow">AI 提取结果</span><h3>{selected ? selected.filename : `等待上传${kind === "resume" ? "简历" : "JD"}`}</h3></div>
+              {selected ? <span className={selected.status === "confirmed" ? "small-tag green-tag" : "small-tag blue-tag"}>{selected.status === "confirmed" ? "已确认" : "需要校对"}</span> : null}
+            </div>
+            {selected ? <div className="ai-review-note"><Sparkles size={15} /><span>强模型仅根据文件内容填充，空白字段代表未识别到信息。保存前请人工核对。</span></div> : null}
+            {!selected ? <div className="materials-empty materials-editor-empty"><FileText size={28} /><p>上传一份文件开始整理</p><span>解析结果会在这里展示并支持编辑</span></div> : null}
+            {selected ? <div className="materials-fields">{fields.map((field) => <label className="material-field" key={field.key}><span>{field.label}{field.hint ? <small>{field.hint}</small> : null}</span>{field.multiline ? <textarea rows={field.key === "summary" ? 3 : 4} value={draft[field.key]} onChange={(event) => updateField(field.key, event.target.value)} /> : <input value={draft[field.key]} onChange={(event) => updateField(field.key, event.target.value)} />}</label>)}</div> : null}
+            {selected ? <div className="materials-form-actions"><button className="text-button danger-text" type="button" onClick={() => void removeSelected()}><Trash2 size={15} /> 删除资料</button><button className="primary-button" type="button" onClick={() => void saveDraft()} disabled={saving}>{saving ? "保存中…" : "确认并保存到档案"} <Check size={15} /></button></div> : null}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
 function MatchPage() {
   const navigate = useNavigate();
   const [selectedRole, setSelectedRole] = useState("后端开发工程师");
@@ -1416,14 +1807,11 @@ function MatchPage() {
     }>
   >([]);
   const [profile, setProfile] = useState<UserProfile>(() => loadUserProfile());
-  const [draftSkills, setDraftSkills] = useState(() => profile.skills.join(", "));
-  const [draftProjects, setDraftProjects] = useState(() => profile.projects.join(", "));
   const [draftJob, setDraftJob] = useState(
     () => profile.job_text || "Python FastAPI PostgreSQL Redis Docker 系统设计",
   );
   const [match, setMatch] = useState<MatchResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const fallbackRoles = [
     {
@@ -1464,20 +1852,20 @@ function MatchPage() {
     : profile.skills.length
       ? profile.skills
       : role.fallbackSkills;
-  const score = Math.min(98, Math.max(45, 58 + matchedSkills.length * 8));
+  const computedScore = Math.min(98, Math.max(45, 58 + matchedSkills.length * 8));
+  const score = Number.isFinite(Number(match?.match_score))
+    ? Number(match?.match_score)
+    : computedScore;
 
   async function refreshMatch() {
     setLoading(true);
     setError("");
     try {
-      const session = await startSession({
+      const result = await previewMatch({
         mode: "technical",
         role: selectedRole,
         job_text: draftJob,
         user_profile: { skills: profile.skills, projects: profile.projects },
-        difficulty: "medium",
-      });
-      const result = await matchSession(session.session_id, {
         difficulty: "medium",
       });
       setMatch(result);
@@ -1513,26 +1901,6 @@ function MatchPage() {
   useEffect(() => {
     if (role) void refreshMatch();
   }, [selectedRole, jobs.length]);
-  async function saveProfile() {
-    setSaving(true);
-    setError("");
-    const next: UserProfile = {
-      ...profile,
-      skills: draftSkills
-        .split(/[,，\n]/)
-        .map((x) => x.trim())
-        .filter(Boolean),
-      projects: draftProjects
-        .split(/[,，\n]/)
-        .map((x) => x.trim())
-        .filter(Boolean),
-      job_text: draftJob,
-    };
-    await saveUserProfile(next);
-    setProfile(next);
-    setSaving(false);
-    await refreshMatch();
-  }
   return (
     <div className="match-page">
       <section className="page-intro">
@@ -1544,12 +1912,10 @@ function MatchPage() {
         <button
           className="secondary-button"
           type="button"
-          onClick={() =>
-            document.getElementById("profile-editor")?.scrollIntoView({ behavior: "smooth" })
-          }
+          onClick={() => navigate("/materials")}
         >
-          <Plus size={16} />
-          编辑个人资料
+          <FolderOpen size={16} />
+          管理求职资料
         </button>
       </section>
       {error ? (
@@ -1610,10 +1976,10 @@ function MatchPage() {
           <button
             className="role-add-button"
             type="button"
-            onClick={() => setDraftJob(`${draftJob}\n\n请粘贴新的 JD 内容`)}
+            onClick={() => navigate("/materials")}
           >
             <Plus size={15} />
-            导入新的 JD
+            上传新的 JD
           </button>
         </aside>
         <div className="match-detail">
@@ -1737,57 +2103,6 @@ function MatchPage() {
               </div>
             </div>
           </div>
-          <section id="profile-editor" className="settings-panel" style={{ marginTop: 20 }}>
-            <div className="panel-title-row">
-              <div>
-                <span className="eyebrow">用户档案</span>
-                <h3>保存技能、项目经历和 JD</h3>
-              </div>
-              <span className="small-tag green-tag">本地 + API</span>
-            </div>
-            <div className="preference-row">
-              <div>
-                <strong>技能</strong>
-                <p>使用逗号或换行分隔</p>
-              </div>
-              <input
-                className="search-input profile-field"
-                value={draftSkills}
-                onChange={(event) => setDraftSkills(event.target.value)}
-              />
-            </div>
-            <div className="preference-row">
-              <div>
-                <strong>项目经历</strong>
-                <p>项目名或一句话成果</p>
-              </div>
-              <input
-                className="search-input profile-field"
-                value={draftProjects}
-                onChange={(event) => setDraftProjects(event.target.value)}
-              />
-            </div>
-            <div className="preference-row">
-              <div>
-                <strong>目标 JD</strong>
-                <p>匹配和面试题召回的输入</p>
-              </div>
-              <textarea
-                className="answer-input profile-field"
-                rows={3}
-                value={draftJob}
-                onChange={(event) => setDraftJob(event.target.value)}
-              />
-            </div>
-            <button
-              className="primary-button"
-              type="button"
-              onClick={() => void saveProfile()}
-              disabled={saving}
-            >
-              {saving ? "保存中…" : "保存并重新匹配"} <ArrowRight size={15} />
-            </button>
-          </section>
         </div>
       </div>
     </div>
@@ -2061,6 +2376,8 @@ function QuestionBankPage() {
                 </a>
               ) : null}
               {selected.sourceLicense ? <small>{selected.sourceLicense}</small> : null}
+              {selected.sourceConfidence ? <small>可信度：{selected.sourceConfidence}</small> : null}
+              {selected.sourceVersion ? <small>版本：{selected.sourceVersion}</small> : null}
             </div>
             <button
               className="primary-button full-button"
@@ -2549,6 +2866,7 @@ function getPageTitle(pathname: string) {
   if (pathname === "/") return "总览";
   if (pathname.startsWith("/practice")) return "开始训练";
   if (pathname.startsWith("/match")) return "岗位匹配";
+  if (pathname.startsWith("/materials")) return "求职资料";
   if (pathname.startsWith("/questions")) return "题库";
   if (pathname.startsWith("/reports")) return "训练报告";
   return "系统设置";
