@@ -5,6 +5,7 @@
 
 import os
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -349,6 +350,39 @@ def test_match_snapshot_survives_identical_profile_resave_and_training_start():
         assert second["score_cached"] is True
         assert second["score_snapshot_id"] == first["score_snapshot_id"]
         assert second["match_score"] == first["match_score"]
+
+
+def test_training_start_ignores_postgres_datetime_profile_metadata(monkeypatch):
+    from app.main import db
+
+    with TestClient(app) as client:
+        assert client.put(
+            "/api/v1/profile",
+            json={"headline": "后端工程师", "skills": ["Python"], "projects": ["TechMatch"]},
+        ).status_code == 200
+        saved = client.post(
+            "/api/v1/jobs",
+            json={"title": "后端岗位", "jd_text": "Python FastAPI"},
+        )
+        job_id = saved.json()["job"]["id"]
+        original_get_profile = db.get_user_profile
+
+        def postgres_style_profile(user_id):
+            profile = original_get_profile(user_id)
+            if profile is not None:
+                profile["updated_at"] = datetime.now(timezone.utc)
+            return profile
+
+        monkeypatch.setattr(db, "get_user_profile", postgres_style_profile)
+        started = client.post(
+            "/api/v1/sessions",
+            json={"mode": "technical", "job_id": job_id},
+        )
+
+        assert started.status_code == 200
+        session = db.get_session(started.json()["session_id"])
+        assert session["user_profile"]["headline"] == "后端工程师"
+        assert "updated_at" not in session["user_profile"]
 
 
 def test_match_generates_traceable_personalized_questions_from_retrieved_bank(monkeypatch):

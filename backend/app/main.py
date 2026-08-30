@@ -24,6 +24,7 @@ from app.schemas.models import (
     MatchRequest,
     SessionCreate,
     TemporaryUserCreate,
+    UserProfile,
     UserProfileUpdate,
 )
 from app.services.interview import InterviewService
@@ -876,7 +877,10 @@ async def start_session(request: SessionCreate, http_request: Request, response:
             # A practice request may carry an old localStorage profile. Once a
             # profile record exists, training must never overwrite it with the
             # browser's partial fallback payload, even if it was cleared.
-            payload["user_profile"] = stored_profile
+            # PostgreSQL returns timestamps as datetime objects; validate into
+            # the public profile contract so storage metadata never reaches a
+            # JSON model prompt or the persisted session snapshot.
+            payload["user_profile"] = UserProfile.model_validate(stored_profile).model_dump()
         if payload.get("job_id"):
             job = db.get_job(str(payload["job_id"]))
             if job is None or job.get("user_id") != payload["user_id"]:
