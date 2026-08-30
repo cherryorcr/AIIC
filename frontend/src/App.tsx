@@ -1001,6 +1001,21 @@ function PracticePage() {
       ]);
     }
   }
+  function pauseGroupAndReply() {
+    if (activeMode !== "group" || groupPaused || !submitted || !nextQuestionData) return;
+    const pendingQuestion = nextQuestionData;
+    setGroupPaused(true);
+    setQuestion(pendingQuestion);
+    setNextQuestionData(null);
+    setQuestionIndex((index) => index + 1);
+    setSubmitted(false);
+    setPanelsSwapped(false);
+    setRevisionOf(null);
+    setAnswer("");
+    setError("");
+    // Keep the previous feedback visible on the right while the candidate
+    // pauses the simulated participants and prepares a response.
+  }
   function supplementAnswer() {
     if (!lastTurnId || !answer.trim()) return;
     setRevisionOf(lastTurnId);
@@ -1026,6 +1041,7 @@ function PracticePage() {
       });
       setFeedback(result.feedback);
       setSubmitted(true);
+      if (activeMode === "group") setGroupPaused(false);
       setLastTurnId(result.turn_id);
       setRevisionOf(null);
       const next = result.next_question ? backendQuestionToQuestion(result.next_question, activeMode, question) : null;
@@ -1035,11 +1051,6 @@ function PracticePage() {
           ...current,
           { id: `user-${result.turn_id}`, kind: "user", speaker: "我", content: answerText },
         ];
-        // A revision receives the same cursor; do not duplicate the current
-        // prompt. A normal answer advances the chat with the model's follow-up.
-        if (next && (!wasRevision || next.id !== question.id)) {
-          messages.push({ id: `assistant-${next.id}-${result.turn_id}`, kind: "assistant", speaker: mode.label, content: next.prompt });
-        }
         const reactions = result.feedback.group_reactions?.length
           ? result.feedback.group_reactions
           : result.feedback.group_reaction
@@ -1056,6 +1067,12 @@ function PracticePage() {
             });
           }
         });
+        // A revision receives the same cursor; do not duplicate the current
+        // prompt. In a group interview, participant messages appear before
+        // the moderator's next prompt to preserve a natural chat sequence.
+        if (next && (!wasRevision || next.id !== question.id)) {
+          messages.push({ id: `assistant-${next.id}-${result.turn_id}`, kind: "assistant", speaker: mode.label, content: next.prompt });
+        }
         return messages;
       });
       if (!result.next_question) setSessionCompleted(false);
@@ -1208,7 +1225,7 @@ function PracticePage() {
           <strong>{Math.min(22 + questionIndex * 12, 92)}%</strong>
         </div>
       </section>
-      {activeMode !== "algorithm" && submitted ? (
+      {activeMode !== "algorithm" && feedback ? (
         <div className="panel-layout-toolbar">
           <span>反馈已生成，可调整面板顺序</span>
           <button className="secondary-button panel-swap-button" type="button" onClick={() => setPanelsSwapped((swapped) => !swapped)} aria-pressed={panelsSwapped} title={panelsSwapped ? "恢复问题在左、反馈在右" : "交换问题和反馈面板"}>
@@ -1320,7 +1337,7 @@ function PracticePage() {
             revisionOf={revisionOf}
             nextQuestionData={nextQuestionData}
             groupPaused={groupPaused}
-            onToggleGroupPause={() => setGroupPaused((paused) => !paused)}
+            onToggleGroupPause={pauseGroupAndReply}
             onSubmit={submitAnswer}
             onNext={nextQuestion}
           />
@@ -1329,7 +1346,7 @@ function PracticePage() {
           <CodeEditor code={code} setCode={setCode} running={running} runResult={runResult} onRun={runCode} />
         ) : (
           <FeedbackPanel
-            submitted={submitted}
+            submitted={submitted || Boolean(feedback)}
             feedback={feedback}
             question={question}
             onRetry={() => {
@@ -1392,8 +1409,14 @@ function ConversationPanel({
           <small>{question.personalized ? "已结合岗位 JD 和你的简历生成" : `围绕一个选题展开多轮回答 · ${mode}`}</small>
         </div>
         {activeMode === "group" ? (
-          <button className={`secondary-button group-pause-button ${groupPaused ? "active" : ""}`} type="button" onClick={onToggleGroupPause} aria-pressed={groupPaused}>
-            {groupPaused ? "继续讨论" : "暂停队友"}
+          <button
+            className={`secondary-button group-pause-button ${groupPaused ? "active" : ""}`}
+            type="button"
+            onClick={onToggleGroupPause}
+            disabled={groupPaused || !submitted || !nextQuestionData}
+            aria-pressed={groupPaused}
+          >
+            {groupPaused ? "队友已暂停" : submitted && nextQuestionData ? "暂停并发言" : "等待你的回答"}
           </button>
         ) : null}
       </div>
@@ -1414,7 +1437,7 @@ function ConversationPanel({
           <div className="chat-typing"><span /> <span /> <span /> 模型正在整理下一步问题…</div>
         ) : null}
       </div>
-      {nextQuestionData && submitted ? (
+      {activeMode !== "group" && nextQuestionData && submitted ? (
         <button className="chat-next-button" type="button" onClick={onNext}>
           <MessageSquareText size={15} /> 继续回答模型追问
         </button>
